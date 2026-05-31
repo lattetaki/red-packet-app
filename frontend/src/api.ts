@@ -185,3 +185,11 @@ export function updateRecord(recordId: number, payload: RecordCreatePayload) {
 export function deleteRecord(recordId: number) {
   return deleteJson<{ deleted: boolean }>(`/records/${recordId}`)
 }
+
+export function approveRecord(recordId: number) {
+  return postJson<RecordDetail, Record<string, never>>(`/admin/review-records/${recordId}/approve`, {})
+}
+
+export function rejectRecord(recordId: number) {
+  return postJson<RecordDetail, Record<string, never>>(`/admin/review-records/${recordId}/reject`, {})
+}

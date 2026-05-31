@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
+  approveRecord,
   createRecord,
   deleteRecord,
   getAmountPresets,
@@ -36,6 +37,7 @@ import {
   type SummaryStats,
   type TrendPoint,
   type UserStatsItem,
+  rejectRecord,
   updateRecord,
 } from './api'
 import './App.css'
@@ -63,6 +65,8 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '用户管理', icon: Users, key: 'users' },
   { label: '数据导入', icon: Database, key: 'import' },
 ]
+
+const currentRole: 'admin' | 'viewer' | 'contributor' = 'admin'
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 
@@ -198,6 +202,7 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
   const [records, setRecords] = useState<RecordListItem[]>([])
+  const [pendingRecords, setPendingRecords] = useState<RecordListItem[]>([])
   const [userStats, setUserStats] = useState<UserStatsItem[]>([])
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
@@ -223,14 +228,18 @@ function App() {
   const [recordDraftClaims, setRecordDraftClaims] = useState<EntryClaim[]>([])
   const [recordMessage, setRecordMessage] = useState<string | null>(null)
   const [recordError, setRecordError] = useState<string | null>(null)
+  const [reviewMessage, setReviewMessage] = useState<string | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [reviewingRecordId, setReviewingRecordId] = useState<number | null>(null)
   const [savingRecord, setSavingRecord] = useState(false)
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
 
   async function loadDashboardData() {
-    const [summaryData, recordData, userStatsData, trendData, participantData, presetData] = await Promise.all([
+    const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
+      getRecords({ status: 'pending', limit: 100 }),
       getUserStats(),
       getTrendPoints(),
       getParticipants(),
@@ -239,6 +248,7 @@ function App() {
 
     setSummary(summaryData)
     setRecords(recordData)
+    setPendingRecords(pendingRecordData)
     setUserStats(userStatsData)
     setTrendPoints(trendData)
     setParticipants(participantData)
@@ -255,6 +265,11 @@ function App() {
       search: recordSearch || undefined,
     })
     setRecords(data)
+  }
+
+  async function loadPendingRecords() {
+    const data = await getRecords({ status: 'pending', limit: 100 })
+    setPendingRecords(data)
   }
 
   useEffect(() => {
@@ -501,6 +516,27 @@ function App() {
       await loadRecordList()
     } catch {
       setRecordError('删除失败。')
+    }
+  }
+
+  async function reviewRecord(recordId: number, action: 'approve' | 'reject') {
+    setReviewMessage(null)
+    setReviewError(null)
+    try {
+      setReviewingRecordId(recordId)
+      if (action === 'approve') {
+        await approveRecord(recordId)
+        setReviewMessage('记录已通过审核，并进入统计。')
+      } else {
+        await rejectRecord(recordId)
+        setReviewMessage('记录已驳回。')
+      }
+      await loadDashboardData()
+      await loadPendingRecords()
+    } catch {
+      setReviewError('审核操作失败。')
+    } finally {
+      setReviewingRecordId(null)
     }
   }
 
@@ -1084,6 +1120,80 @@ function App() {
     )
   }
 
+  function renderReviewQueue() {
+    if (currentRole !== 'admin') {
+      return renderPlaceholder('审核队列', '该页面仅管理员可见。')
+    }
+
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold">审核队列</h2>
+            <p className="mt-1 text-sm text-slate-500">待审核记录不会进入统计，管理员通过后才会计入。</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={loadPendingRecords}>
+            刷新
+          </Button>
+        </div>
+
+        <div className="p-5">
+          {reviewError ? <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{reviewError}</div> : null}
+          {reviewMessage ? (
+            <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{reviewMessage}</div>
+          ) : null}
+
+          {pendingRecords.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
+              当前没有待审核记录。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {pendingRecords.map((record) => (
+                <article key={record.id} className="rounded-lg border border-slate-200 p-4">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold">{record.sender_name}</p>
+                        <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">待审核</span>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-500">
+                        {formatTime(record.time)} · 总额 {formatMoney(record.total_amount)} · 明细合计 {formatMoney(record.claimed_amount)} ·{' '}
+                        {record.claim_count} 人
+                      </p>
+                      {record.note ? <p className="mt-2 text-sm text-slate-600">备注：{record.note}</p> : null}
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={() => openRecord(record.id)}>
+                        查看明细
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => reviewRecord(record.id, 'reject')}
+                        disabled={reviewingRecordId === record.id}
+                      >
+                        驳回
+                      </Button>
+                      <Button
+                        className="bg-red-600 text-white hover:bg-red-700"
+                        size="sm"
+                        onClick={() => reviewRecord(record.id, 'approve')}
+                        disabled={reviewingRecordId === record.id}
+                      >
+                        通过
+                      </Button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    )
+  }
+
   function renderPlaceholder(title: string, description: string) {
     return (
       <section className="rounded-lg border border-dashed border-slate-300 bg-white p-8">
@@ -1101,7 +1211,7 @@ function App() {
       return renderRecords()
     }
     if (activeView === 'review') {
-      return renderPlaceholder('审核队列', '后续协作录入开放后，待审核记录会集中显示在这里。')
+      return renderReviewQueue()
     }
     if (activeView === 'users') {
       return renderPlaceholder('用户管理', '后续这里会管理预设用户名单和登录账号权限。')
@@ -1129,6 +1239,9 @@ function App() {
 
             <nav className="mt-8 space-y-1">
               {navItems.map((item) => {
+                if (item.key === 'review' && currentRole !== 'admin') {
+                  return null
+                }
                 const Icon = item.icon
                 const active = activeView === item.key
 

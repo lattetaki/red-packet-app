@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import create_db_and_tables, get_db
-from models import AmountPreset, Participant, RedPacketRecord
+from models import AmountPreset, Participant, RecordStatus, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
@@ -161,6 +161,29 @@ def delete_record(record_id: int, db: Session = Depends(get_db)):
     db.delete(record)
     db.commit()
     return {"deleted": True}
+
+
+@app.post("/admin/review-records/{record_id}/approve", response_model=RecordDetail)
+def approve_record(record_id: int, db: Session = Depends(get_db)):
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    record.status = RecordStatus.approved.value
+    record.approved_at = datetime.utcnow()
+    db.commit()
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
+    return serialize_record_detail(record)
+
+
+@app.post("/admin/review-records/{record_id}/reject", response_model=RecordDetail)
+def reject_record(record_id: int, db: Session = Depends(get_db)):
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    record.status = RecordStatus.rejected.value
+    db.commit()
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
+    return serialize_record_detail(record)
 
 
 @app.get("/stats/summary", response_model=SummaryStats)
