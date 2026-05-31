@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,7 @@ from schemas import (
     ParticipantRead,
     RecordCreate,
     RecordDetail,
+    RecordUpdate,
     RecordListItem,
     SummaryStats,
     TrendPoint,
@@ -32,6 +34,7 @@ from services import (
     import_json_data,
     serialize_record_detail,
     serialize_record_list_item,
+    update_record,
 )
 
 
@@ -92,12 +95,27 @@ def list_amount_presets(db: Session = Depends(get_db)):
 @app.get("/records", response_model=list[RecordListItem])
 def list_records(
     status: str | None = Query(default=None),
+    sender_id: int | None = Query(default=None),
+    search: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     query = get_record_query()
     if status:
         query = query.where(RedPacketRecord.status == status)
+    if sender_id:
+        query = query.where(RedPacketRecord.sender_id == sender_id)
+    if date_from:
+        query = query.where(RedPacketRecord.time >= date_from)
+    if date_to:
+        query = query.where(RedPacketRecord.time <= date_to)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.join(RedPacketRecord.sender).where(
+            or_(RedPacketRecord.note.ilike(pattern), Participant.name.ilike(pattern), RedPacketRecord.legacy_id.ilike(pattern))
+        )
     records = db.scalars(query.limit(limit)).all()
     return [serialize_record_list_item(record) for record in records]
 
@@ -119,6 +137,20 @@ def get_record(record_id: int, db: Session = Depends(get_db)):
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     return serialize_record_detail(record)
+
+
+@app.put("/records/{record_id}", response_model=RecordDetail)
+def put_record(record_id: int, payload: RecordUpdate, db: Session = Depends(get_db)):
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    try:
+        updated = update_record(db, record, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    updated = db.scalars(get_record_query().where(RedPacketRecord.id == updated.id)).one()
+    return serialize_record_detail(updated)
 
 
 @app.delete("/records/{record_id}")

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from models import AmountPreset, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import amount_to_cents, cents_to_amount
-from schemas import ImportReport, RecordCreate
+from schemas import ImportReport, RecordCreate, RecordUpdate
 
 
 TIME_PATTERNS = (
@@ -134,6 +134,46 @@ def create_record(db: Session, payload: RecordCreate) -> RedPacketRecord:
         db.add(
             RedPacketClaim(
                 record_id=record.id,
+                participant_id=claim.participant_id,
+                amount_cents=amount_to_cents(claim.amount),
+                sort_order=index,
+            )
+        )
+
+    get_or_create_preset(db, payload.total_amount)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def update_record(db: Session, record: RedPacketRecord, payload: RecordUpdate) -> RedPacketRecord:
+    sender = db.get(Participant, payload.sender_id)
+    if sender is None:
+        raise ValueError("Sender does not exist")
+
+    status = payload.status
+    if status not in {item.value for item in RecordStatus}:
+        raise ValueError("Invalid status")
+
+    participant_ids = [claim.participant_id for claim in payload.claims]
+    participants = db.scalars(select(Participant).where(Participant.id.in_(participant_ids))).all()
+    found_ids = {participant.id for participant in participants}
+    missing_ids = set(participant_ids) - found_ids
+    if missing_ids:
+        raise ValueError(f"Claim participant does not exist: {sorted(missing_ids)}")
+
+    record.time = payload.time or record.time
+    record.sender_id = payload.sender_id
+    record.total_amount_cents = amount_to_cents(payload.total_amount)
+    record.note = payload.note.strip()
+    record.status = status
+    record.approved_at = datetime.utcnow() if status == RecordStatus.approved.value and not record.approved_at else record.approved_at
+    record.claims.clear()
+    db.flush()
+
+    for index, claim in enumerate(payload.claims):
+        record.claims.append(
+            RedPacketClaim(
                 participant_id=claim.participant_id,
                 amount_cents=amount_to_cents(claim.amount),
                 sort_order=index,

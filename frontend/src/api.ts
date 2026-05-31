@@ -21,6 +21,17 @@ export type RecordListItem = {
   status: string
 }
 
+export type ClaimRead = {
+  id: number
+  participant_id: number
+  participant_name: string
+  amount: string
+}
+
+export type RecordDetail = RecordListItem & {
+  claims: ClaimRead[]
+}
+
 export type UserStatsItem = {
   participant_id: number
   name: string
@@ -58,11 +69,18 @@ export type RecordCreatePayload = {
   sender_id: number
   total_amount: string
   note: string
-  status: 'approved' | 'pending'
+  status: 'approved' | 'pending' | 'rejected'
   claims: Array<{
     participant_id: number
     amount: string
   }>
+}
+
+export type RecordQuery = {
+  status?: string
+  senderId?: string
+  search?: string
+  limit?: number
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -91,12 +109,53 @@ async function postJson<TResponse, TPayload>(path: string, payload: TPayload): P
   return response.json() as Promise<TResponse>
 }
 
+async function putJson<TResponse, TPayload>(path: string, payload: TPayload): Promise<TResponse> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<TResponse>
+}
+
+async function deleteJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'DELETE',
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<T>
+}
+
 export function getSummaryStats() {
   return getJson<SummaryStats>('/stats/summary')
 }
 
 export function getRecentRecords(limit = 6) {
-  return getJson<RecordListItem[]>(`/records?limit=${limit}&status=approved`)
+  return getRecords({ limit, status: 'approved' })
+}
+
+export function getRecords(query: RecordQuery = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(query.limit ?? 30))
+  if (query.status) params.set('status', query.status)
+  if (query.senderId) params.set('sender_id', query.senderId)
+  if (query.search) params.set('search', query.search)
+  return getJson<RecordListItem[]>(`/records?${params.toString()}`)
+}
+
+export function getRecord(recordId: number) {
+  return getJson<RecordDetail>(`/records/${recordId}`)
 }
 
 export function getUserStats() {
@@ -116,5 +175,13 @@ export function getAmountPresets() {
 }
 
 export function createRecord(payload: RecordCreatePayload) {
-  return postJson<RecordListItem, RecordCreatePayload>('/records', payload)
+  return postJson<RecordDetail, RecordCreatePayload>('/records', payload)
+}
+
+export function updateRecord(recordId: number, payload: RecordCreatePayload) {
+  return putJson<RecordDetail, RecordCreatePayload>(`/records/${recordId}`, payload)
+}
+
+export function deleteRecord(recordId: number) {
+  return deleteJson<{ deleted: boolean }>(`/records/${recordId}`)
 }

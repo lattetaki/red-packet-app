@@ -19,8 +19,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   createRecord,
+  deleteRecord,
   getAmountPresets,
   getParticipants,
+  getRecord,
+  getRecords,
   getRecentRecords,
   getSummaryStats,
   getTrendPoints,
@@ -28,10 +31,12 @@ import {
   type AmountPreset,
   type Participant,
   type RecordCreatePayload,
+  type RecordDetail,
   type RecordListItem,
   type SummaryStats,
   type TrendPoint,
   type UserStatsItem,
+  updateRecord,
 } from './api'
 import './App.css'
 
@@ -86,6 +91,15 @@ function currentDateTimeLocal() {
   const now = new Date()
   const offset = now.getTimezoneOffset() * 60_000
   return new Date(now.getTime() - offset).toISOString().slice(0, 16)
+}
+
+function toDateTimeLocal(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return currentDateTimeLocal()
+  }
+  const offset = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
 function newClaim(participantId = ''): EntryClaim {
@@ -197,6 +211,19 @@ function App() {
   const [entryMessage, setEntryMessage] = useState<string | null>(null)
   const [entryError, setEntryError] = useState<string | null>(null)
   const [savingEntry, setSavingEntry] = useState(false)
+  const [recordSearch, setRecordSearch] = useState('')
+  const [recordSenderFilter, setRecordSenderFilter] = useState('')
+  const [recordStatusFilter, setRecordStatusFilter] = useState('approved')
+  const [selectedRecord, setSelectedRecord] = useState<RecordDetail | null>(null)
+  const [recordDraftTime, setRecordDraftTime] = useState('')
+  const [recordDraftSenderId, setRecordDraftSenderId] = useState('')
+  const [recordDraftTotal, setRecordDraftTotal] = useState('10')
+  const [recordDraftNote, setRecordDraftNote] = useState('')
+  const [recordDraftStatus, setRecordDraftStatus] = useState<'approved' | 'pending' | 'rejected'>('approved')
+  const [recordDraftClaims, setRecordDraftClaims] = useState<EntryClaim[]>([])
+  const [recordMessage, setRecordMessage] = useState<string | null>(null)
+  const [recordError, setRecordError] = useState<string | null>(null)
+  const [savingRecord, setSavingRecord] = useState(false)
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
 
@@ -218,6 +245,16 @@ function App() {
     setAmountPresets(presetData)
     setSelectedTrendUserIds((current) => (current.size ? current : new Set(userStatsData.map((item) => item.participant_id))))
     setSenderId((current) => current || String(participantData[0]?.id ?? ''))
+  }
+
+  async function loadRecordList() {
+    const data = await getRecords({
+      limit: 30,
+      status: recordStatusFilter || undefined,
+      senderId: recordSenderFilter || undefined,
+      search: recordSearch || undefined,
+    })
+    setRecords(data)
   }
 
   useEffect(() => {
@@ -360,7 +397,7 @@ function App() {
     }
 
     const payload: RecordCreatePayload = {
-      time: entryTime ? new Date(entryTime).toISOString() : undefined,
+      time: entryTime || undefined,
       sender_id: Number(senderId),
       total_amount: totalAmount,
       note,
@@ -378,6 +415,92 @@ function App() {
       setEntryError('保存失败，请检查金额和用户选择。')
     } finally {
       setSavingEntry(false)
+    }
+  }
+
+  async function openRecord(recordId: number) {
+    setRecordMessage(null)
+    setRecordError(null)
+    try {
+      const record = await getRecord(recordId)
+      setSelectedRecord(record)
+      setRecordDraftTime(toDateTimeLocal(record.time))
+      setRecordDraftSenderId(String(record.sender_id))
+      setRecordDraftTotal(record.total_amount)
+      setRecordDraftNote(record.note)
+      setRecordDraftStatus(record.status as 'approved' | 'pending' | 'rejected')
+      setRecordDraftClaims(
+        record.claims.map((claim) => ({
+          id: crypto.randomUUID(),
+          participantId: String(claim.participant_id),
+          amount: claim.amount,
+        })),
+      )
+    } catch {
+      setRecordError('读取记录详情失败。')
+    }
+  }
+
+  async function saveSelectedRecord() {
+    if (!selectedRecord) return
+    setRecordMessage(null)
+    setRecordError(null)
+
+    const claims = recordDraftClaims
+      .filter((claim) => claim.participantId || claim.amount.trim())
+      .map((claim) => ({
+        participant_id: Number(claim.participantId),
+        amount: claim.amount.trim(),
+      }))
+
+    if (!recordDraftSenderId || claims.length === 0 || claims.some((claim) => !claim.participant_id || !claim.amount)) {
+      setRecordError('请完整填写发包人和抢包明细。')
+      return
+    }
+
+    if (Math.abs(sumClaimAmounts(recordDraftClaims) - toNumber(recordDraftTotal)) > 0.001) {
+      const confirmed = window.confirm(
+        `红包总额为 ${formatMoney(recordDraftTotal)}，抢包明细合计为 ¥${sumClaimAmounts(recordDraftClaims).toFixed(2)}，仍然保存吗？`,
+      )
+      if (!confirmed) return
+    }
+
+    const payload: RecordCreatePayload = {
+      time: recordDraftTime || undefined,
+      sender_id: Number(recordDraftSenderId),
+      total_amount: recordDraftTotal,
+      note: recordDraftNote,
+      status: recordDraftStatus,
+      claims,
+    }
+
+    try {
+      setSavingRecord(true)
+      const updated = await updateRecord(selectedRecord.id, payload)
+      setSelectedRecord(updated)
+      setRecordMessage('记录已更新。')
+      await loadDashboardData()
+      await loadRecordList()
+    } catch {
+      setRecordError('更新失败，请检查记录内容。')
+    } finally {
+      setSavingRecord(false)
+    }
+  }
+
+  async function deleteSelectedRecord() {
+    if (!selectedRecord) return
+    const confirmed = window.confirm(`确定删除这条记录吗？\n\n时间：${formatTime(selectedRecord.time)}\n发包人：${selectedRecord.sender_name}`)
+    if (!confirmed) return
+
+    try {
+      await deleteRecord(selectedRecord.id)
+      setSelectedRecord(null)
+      setRecordMessage(null)
+      await loadDashboardData()
+      await loadRecordList()
+    } catch {
+      setRecordError('删除失败。')
     }
   }
 
@@ -712,45 +835,251 @@ function App() {
     )
   }
 
-  function renderRecords() {
+  function renderRecordEditor() {
+    if (!selectedRecord) {
+      return (
+        <aside className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
+          双击左侧任意记录查看明细。这里会显示主记录和抢包明细，并支持编辑、保存和删除。
+        </aside>
+      )
+    }
+
+    const draftClaimTotal = sumClaimAmounts(recordDraftClaims)
+    const draftMismatch = Math.abs(draftClaimTotal - toNumber(recordDraftTotal)) > 0.001
+
     return (
-      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-          <div>
-            <h2 className="text-base font-semibold">记录列表</h2>
-            <p className="mt-1 text-sm text-slate-500">当前展示最近 30 条已审核记录。</p>
+      <aside className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-base font-semibold">记录明细</h2>
+              <p className="mt-1 text-sm text-slate-500">ID #{selectedRecord.id}</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => setSelectedRecord(null)}>
+              关闭
+            </Button>
           </div>
-          <Button variant="outline" size="sm">
-            筛选
-          </Button>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left text-sm">
-            <thead className="bg-slate-50 text-xs font-medium text-slate-500">
-              <tr>
-                <th className="px-5 py-3">时间</th>
-                <th className="px-5 py-3">发包人</th>
-                <th className="px-5 py-3">红包总额</th>
-                <th className="px-5 py-3">参与人数</th>
-                <th className="px-5 py-3">已录入金额</th>
-                <th className="px-5 py-3">备注</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {records.map((record) => (
-                <tr key={record.id} className="hover:bg-slate-50/70">
-                  <td className="whitespace-nowrap px-5 py-3 text-slate-600">{formatTime(record.time)}</td>
-                  <td className="px-5 py-3 font-medium">{record.sender_name}</td>
-                  <td className="px-5 py-3">{formatMoney(record.total_amount)}</td>
-                  <td className="px-5 py-3">{record.claim_count}</td>
-                  <td className="px-5 py-3">{formatMoney(record.claimed_amount)}</td>
-                  <td className="px-5 py-3 text-slate-500">{record.note || '-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="space-y-4 p-5">
+          {recordError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{recordError}</div> : null}
+          {recordMessage ? (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{recordMessage}</div>
+          ) : null}
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium text-slate-500">时间</span>
+            <input
+              className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              type="datetime-local"
+              value={recordDraftTime}
+              onChange={(event) => setRecordDraftTime(event.target.value)}
+            />
+          </label>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">发包人</span>
+              <select
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordDraftSenderId}
+                onChange={(event) => setRecordDraftSenderId(event.target.value)}
+              >
+                {participants.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">状态</span>
+              <select
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordDraftStatus}
+                onChange={(event) => setRecordDraftStatus(event.target.value as 'approved' | 'pending' | 'rejected')}
+              >
+                <option value="approved">已审核</option>
+                <option value="pending">待审核</option>
+                <option value="rejected">已驳回</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium text-slate-500">红包总额</span>
+            <input
+              className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              value={recordDraftTotal}
+              onChange={(event) => setRecordDraftTotal(event.target.value)}
+            />
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium text-slate-500">备注</span>
+            <input
+              className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              value={recordDraftNote}
+              onChange={(event) => setRecordDraftNote(event.target.value)}
+            />
+          </label>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-slate-500">抢包明细</span>
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => setRecordDraftClaims((current) => [...current, newClaim()])}
+              >
+                <Plus className="size-3" />
+                加一行
+              </Button>
+            </div>
+
+            {recordDraftClaims.map((claim) => (
+              <div key={claim.id} className="grid grid-cols-[1fr_92px_56px] gap-2">
+                <select
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  value={claim.participantId}
+                  onChange={(event) =>
+                    setRecordDraftClaims((current) =>
+                      current.map((item) => (item.id === claim.id ? { ...item, participantId: event.target.value } : item)),
+                    )
+                  }
+                >
+                  <option value="">请选择</option>
+                  {participants.map((participant) => (
+                    <option key={participant.id} value={participant.id}>
+                      {participant.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-right text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  value={claim.amount}
+                  onChange={(event) =>
+                    setRecordDraftClaims((current) =>
+                      current.map((item) => (item.id === claim.id ? { ...item, amount: event.target.value } : item)),
+                    )
+                  }
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    setRecordDraftClaims((current) => (current.length <= 1 ? current : current.filter((item) => item.id !== claim.id)))
+                  }
+                >
+                  删除
+                </Button>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className={`rounded-lg border px-3 py-2 text-sm ${
+              draftMismatch ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+            }`}
+          >
+            明细合计 ¥{draftClaimTotal.toFixed(2)}
+            {draftMismatch ? '，与总额不一致。' : '，与总额一致。'}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="outline" onClick={deleteSelectedRecord}>
+              删除记录
+            </Button>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveSelectedRecord} disabled={savingRecord}>
+              {savingRecord ? '保存中' : '保存修改'}
+            </Button>
+          </div>
         </div>
+      </aside>
+    )
+  }
+
+  function renderRecords() {
+    return (
+      <section className="grid gap-5 xl:grid-cols-[1fr_460px]">
+        <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold">记录列表</h2>
+                <p className="mt-1 text-sm text-slate-500">双击记录可查看明细并编辑。</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={loadRecordList}>
+                筛选
+              </Button>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-[1fr_160px_140px]">
+              <input
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordSearch}
+                onChange={(event) => setRecordSearch(event.target.value)}
+                placeholder="搜索发包人、备注或旧记录 ID"
+              />
+              <select
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordSenderFilter}
+                onChange={(event) => setRecordSenderFilter(event.target.value)}
+              >
+                <option value="">全部发包人</option>
+                {participants.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordStatusFilter}
+                onChange={(event) => setRecordStatusFilter(event.target.value)}
+              >
+                <option value="approved">已审核</option>
+                <option value="pending">待审核</option>
+                <option value="rejected">已驳回</option>
+                <option value="">全部状态</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-medium text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">时间</th>
+                  <th className="px-5 py-3">发包人</th>
+                  <th className="px-5 py-3">红包总额</th>
+                  <th className="px-5 py-3">参与人数</th>
+                  <th className="px-5 py-3">已录入金额</th>
+                  <th className="px-5 py-3">备注</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {records.map((record) => (
+                  <tr
+                    key={record.id}
+                    className={`cursor-pointer hover:bg-slate-50/70 ${selectedRecord?.id === record.id ? 'bg-red-50/60' : ''}`}
+                    onClick={() => openRecord(record.id)}
+                  >
+                    <td className="whitespace-nowrap px-5 py-3 text-slate-600">{formatTime(record.time)}</td>
+                    <td className="px-5 py-3 font-medium">{record.sender_name}</td>
+                    <td className="px-5 py-3">{formatMoney(record.total_amount)}</td>
+                    <td className="px-5 py-3">{record.claim_count}</td>
+                    <td className="px-5 py-3">{formatMoney(record.claimed_amount)}</td>
+                    <td className="px-5 py-3 text-slate-500">{record.note || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {renderRecordEditor()}
       </section>
     )
   }

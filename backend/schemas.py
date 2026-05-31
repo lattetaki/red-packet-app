@@ -42,6 +42,10 @@ class RecordCreate(BaseModel):
     claims: list[ClaimCreate] = Field(min_length=1)
 
 
+class RecordUpdate(RecordCreate):
+    pass
+
+
 class RecordListItem(BaseModel):
     id: int
     legacy_id: str | None
