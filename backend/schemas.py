@@ -36,6 +36,11 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=120)
 
 
+class LoginResponse(BaseModel):
+    user: AppUserRead
+    token: str
+
+
 class AppUserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     display_name: str = Field(min_length=1, max_length=120)

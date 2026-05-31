@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from auth import hash_password
+from auth import create_access_token, get_current_user, hash_password, require_admin
 from database import SessionLocal, create_db_and_tables, get_db
 from models import AmountPreset, AppUser, Participant, RecordStatus, RedPacketRecord
 from money import cents_to_amount
@@ -20,6 +20,7 @@ from schemas import (
     ImportReport,
     ImportRequest,
     LoginRequest,
+    LoginResponse,
     ParticipantCreate,
     ParticipantRead,
     RecordCreate,
@@ -79,21 +80,21 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/auth/login", response_model=AppUserRead)
+@app.post("/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_app_user(db, payload.username, payload.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    return user
+    return {"user": user, "token": create_access_token(user)}
 
 
 @app.get("/participants", response_model=list[ParticipantRead])
-def list_participants(db: Session = Depends(get_db)):
+def list_participants(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.scalars(select(Participant).order_by(Participant.name)).all()
 
 
 @app.post("/participants", response_model=ParticipantRead)
-def create_participant(payload: ParticipantCreate, db: Session = Depends(get_db)):
+def create_participant(payload: ParticipantCreate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     participant = Participant(name=payload.name.strip())
     db.add(participant)
     try:
@@ -106,12 +107,12 @@ def create_participant(payload: ParticipantCreate, db: Session = Depends(get_db)
 
 
 @app.get("/admin/app-users", response_model=list[AppUserRead])
-def list_app_users(db: Session = Depends(get_db)):
+def list_app_users(_: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     return db.scalars(select(AppUser).order_by(AppUser.role, AppUser.username)).all()
 
 
 @app.post("/admin/app-users", response_model=AppUserRead)
-def create_app_user(payload: AppUserCreate, db: Session = Depends(get_db)):
+def create_app_user(payload: AppUserCreate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.role not in VALID_APP_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
 
@@ -133,7 +134,7 @@ def create_app_user(payload: AppUserCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/admin/app-users/{user_id}", response_model=AppUserRead)
-def update_app_user(user_id: int, payload: AppUserUpdate, db: Session = Depends(get_db)):
+def update_app_user(user_id: int, payload: AppUserUpdate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.role not in VALID_APP_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
 
@@ -153,7 +154,7 @@ def update_app_user(user_id: int, payload: AppUserUpdate, db: Session = Depends(
 
 
 @app.get("/amount-presets", response_model=list[AmountPresetRead])
-def list_amount_presets(db: Session = Depends(get_db)):
+def list_amount_presets(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     presets = db.scalars(select(AmountPreset).where(AmountPreset.is_active.is_(True)).order_by(AmountPreset.amount_cents)).all()
     return [
         {"id": preset.id, "amount": cents_to_amount(preset.amount_cents), "is_active": preset.is_active}
@@ -169,10 +170,13 @@ def list_records(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
+    current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     query = get_record_query()
-    if status:
+    if current_user.role != "admin":
+        query = query.where(RedPacketRecord.status == RecordStatus.approved.value)
+    elif status:
         query = query.where(RedPacketRecord.status == status)
     if sender_id:
         query = query.where(RedPacketRecord.sender_id == sender_id)
@@ -190,7 +194,9 @@ def list_records(
 
 
 @app.post("/records", response_model=RecordDetail)
-def add_record(payload: RecordCreate, db: Session = Depends(get_db)):
+def add_record(payload: RecordCreate, current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != "admin":
+        payload.status = RecordStatus.pending.value
     try:
         record = create_record(db, payload)
     except ValueError as exc:
@@ -201,15 +207,17 @@ def add_record(payload: RecordCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/records/{record_id}", response_model=RecordDetail)
-def get_record(record_id: int, db: Session = Depends(get_db)):
+def get_record(record_id: int, current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if current_user.role != "admin" and record.status != RecordStatus.approved.value:
         raise HTTPException(status_code=404, detail="Record not found")
     return serialize_record_detail(record)
 
 
 @app.put("/records/{record_id}", response_model=RecordDetail)
-def put_record(record_id: int, payload: RecordUpdate, db: Session = Depends(get_db)):
+def put_record(record_id: int, payload: RecordUpdate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
@@ -223,7 +231,7 @@ def put_record(record_id: int, payload: RecordUpdate, db: Session = Depends(get_
 
 
 @app.delete("/records/{record_id}")
-def delete_record(record_id: int, db: Session = Depends(get_db)):
+def delete_record(record_id: int, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     record = db.get(RedPacketRecord, record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
@@ -233,11 +241,12 @@ def delete_record(record_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/admin/review-records/{record_id}/approve", response_model=RecordDetail)
-def approve_record(record_id: int, db: Session = Depends(get_db)):
+def approve_record(record_id: int, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     record.status = RecordStatus.approved.value
+    record.approved_by_user_id = current_user.id
     record.approved_at = datetime.utcnow()
     db.commit()
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
@@ -245,7 +254,7 @@ def approve_record(record_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/admin/review-records/{record_id}/reject", response_model=RecordDetail)
-def reject_record(record_id: int, db: Session = Depends(get_db)):
+def reject_record(record_id: int, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
@@ -256,22 +265,22 @@ def reject_record(record_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/stats/summary", response_model=SummaryStats)
-def stats_summary(db: Session = Depends(get_db)):
+def stats_summary(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return build_summary(db)
 
 
 @app.get("/stats/users", response_model=list[UserStatsItem])
-def stats_users(db: Session = Depends(get_db)):
+def stats_users(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return build_user_stats(db)
 
 
 @app.get("/stats/trends", response_model=list[TrendPoint])
-def stats_trends(db: Session = Depends(get_db)):
+def stats_trends(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return build_trends(db)
 
 
 @app.post("/admin/import-json", response_model=ImportReport)
-def import_json(payload: ImportRequest, db: Session = Depends(get_db)):
+def import_json(payload: ImportRequest, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     source_path = Path(payload.path)
     if not source_path.is_absolute():
         source_path = (Path(__file__).parent / source_path).resolve()

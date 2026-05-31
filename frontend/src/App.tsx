@@ -33,6 +33,7 @@ import {
   getTrendPoints,
   getUserStats,
   login,
+  setAuthToken,
   type AppUser,
   type AppUserCreatePayload,
   type AppUserUpdatePayload,
@@ -70,6 +71,11 @@ type AppUserDraft = {
   role: AppUser['role']
   isActive: boolean
   password: string
+}
+
+type AuthSession = {
+  user: AppUser
+  token: string
 }
 
 const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
@@ -135,14 +141,20 @@ function newClaim(participantId = ''): EntryClaim {
   return { id: crypto.randomUUID(), participantId, amount: '' }
 }
 
-function readSavedUser() {
+function readSavedSession() {
   const raw = window.localStorage.getItem(savedUserKey)
   if (!raw) {
     return null
   }
 
   try {
-    return JSON.parse(raw) as AppUser
+    const parsed = JSON.parse(raw) as Partial<AuthSession>
+    if (!parsed.user || !parsed.token) {
+      window.localStorage.removeItem(savedUserKey)
+      return null
+    }
+    setAuthToken(parsed.token)
+    return parsed as AuthSession
   } catch {
     window.localStorage.removeItem(savedUserKey)
     return null
@@ -238,7 +250,7 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
 }
 
 function App() {
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => readSavedUser())
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => readSavedSession())
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
   const [records, setRecords] = useState<RecordListItem[]>([])
@@ -291,6 +303,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
 
+  const currentUser = authSession?.user ?? null
   const currentRole = currentUser?.role ?? 'viewer'
   const isAdmin = currentRole === 'admin'
 
@@ -298,7 +311,7 @@ function App() {
     const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
-      getRecords({ status: 'pending', limit: 100 }),
+      isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve([]),
       getUserStats(),
       getTrendPoints(),
       getParticipants(),
@@ -355,9 +368,10 @@ function App() {
 
     try {
       setLoggingIn(true)
-      const user = await login(loginUsername.trim(), loginPassword)
-      window.localStorage.setItem(savedUserKey, JSON.stringify(user))
-      setCurrentUser(user)
+      const session = await login(loginUsername.trim(), loginPassword)
+      setAuthToken(session.token)
+      window.localStorage.setItem(savedUserKey, JSON.stringify(session))
+      setAuthSession(session)
       setActiveView('dashboard')
       setLoginPassword('')
     } catch {
@@ -369,7 +383,8 @@ function App() {
 
   function handleLogout() {
     window.localStorage.removeItem(savedUserKey)
-    setCurrentUser(null)
+    setAuthToken(null)
+    setAuthSession(null)
     setActiveView('dashboard')
     setSelectedRecord(null)
   }
@@ -434,8 +449,9 @@ function App() {
         },
       }))
       if (currentUser?.id === updated.id) {
-        window.localStorage.setItem(savedUserKey, JSON.stringify(updated))
-        setCurrentUser(updated)
+        const nextSession = { user: updated, token: authSession?.token ?? '' }
+        window.localStorage.setItem(savedUserKey, JSON.stringify(nextSession))
+        setAuthSession(nextSession)
       }
       setUserManageMessage(draft.password ? '账号信息和密码已更新。' : '账号信息已更新。')
     } catch {
@@ -477,6 +493,18 @@ function App() {
       active = false
     }
   }, [currentUser, loadDashboardData])
+
+  useEffect(() => {
+    function handleAuthExpired() {
+      window.localStorage.removeItem(savedUserKey)
+      setAuthSession(null)
+      setActiveView('dashboard')
+      setApiError('登录已过期，请重新登录。')
+    }
+
+    window.addEventListener('red-packet-auth-expired', handleAuthExpired)
+    return () => window.removeEventListener('red-packet-auth-expired', handleAuthExpired)
+  }, [])
 
   const summaryItems: SummaryItem[] = useMemo(
     () => [

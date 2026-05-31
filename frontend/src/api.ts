@@ -1,4 +1,5 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
+let authToken: string | null = null
 
 export type SummaryStats = {
   record_count: number
@@ -72,6 +73,11 @@ export type AppUser = {
   is_active: boolean
 }
 
+export type LoginResponse = {
+  user: AppUser
+  token: string
+}
+
 export type AppUserCreatePayload = {
   username: string
   display_name: string
@@ -106,58 +112,69 @@ export type RecordQuery = {
   limit?: number
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`)
+function buildHeaders(hasJsonBody = false) {
+  const headers: Record<string, string> = {}
+  if (hasJsonBody) {
+    headers['Content-Type'] = 'application/json'
+  }
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`
+  }
+  return headers
+}
+
+export function setAuthToken(token: string | null) {
+  authToken = token
+}
+
+async function handleResponse<T>(response: Response): Promise<T> {
+  if (response.status === 401) {
+    setAuthToken(null)
+    window.dispatchEvent(new CustomEvent('red-packet-auth-expired'))
+  }
 
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`)
   }
 
   return response.json() as Promise<T>
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: buildHeaders(),
+  })
+
+  return handleResponse<T>(response)
 }
 
 async function postJson<TResponse, TPayload>(path: string, payload: TPayload): Promise<TResponse> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(true),
     body: JSON.stringify(payload),
   })
 
-  if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`)
-  }
-
-  return response.json() as Promise<TResponse>
+  return handleResponse<TResponse>(response)
 }
 
 async function putJson<TResponse, TPayload>(path: string, payload: TPayload): Promise<TResponse> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(true),
     body: JSON.stringify(payload),
   })
 
-  if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`)
-  }
-
-  return response.json() as Promise<TResponse>
+  return handleResponse<TResponse>(response)
 }
 
 async function deleteJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'DELETE',
+    headers: buildHeaders(),
   })
 
-  if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`)
-  }
-
-  return response.json() as Promise<T>
+  return handleResponse<T>(response)
 }
 
 export function getSummaryStats() {
@@ -165,7 +182,7 @@ export function getSummaryStats() {
 }
 
 export function login(username: string, password: string) {
-  return postJson<AppUser, { username: string; password: string }>('/auth/login', { username, password })
+  return postJson<LoginResponse, { username: string; password: string }>('/auth/login', { username, password })
 }
 
 export function getRecentRecords(limit = 6) {
