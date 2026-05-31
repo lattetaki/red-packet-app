@@ -2,6 +2,7 @@ backend/.venv/
 backend/*.db
 backend/*.sqlite
 hongbao_data.json
+cankao.py
 frontend/node_modules/
 __pycache__/
 *.pyc
