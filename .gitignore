@@ -1,4 +1,7 @@
 backend/.venv/
+backend/*.db
+backend/*.sqlite
+hongbao_data.json
 frontend/node_modules/
 __pycache__/
 *.pyc

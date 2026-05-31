@@ -1,0 +1,385 @@
+import json
+from collections import defaultdict
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session, selectinload
+
+from models import AmountPreset, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
+from money import amount_to_cents, cents_to_amount
+from schemas import ImportReport, RecordCreate
+
+
+TIME_PATTERNS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y/%m/%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+)
+
+
+def parse_record_time(value: str | None) -> datetime:
+    text = (value or "").strip()
+    if not text:
+        return datetime.utcnow()
+
+    for pattern in TIME_PATTERNS:
+        try:
+            parsed = datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+
+        if pattern in ("%Y-%m-%d", "%Y/%m/%d"):
+            return parsed.replace(hour=0, minute=0, second=0)
+        if pattern in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+            return parsed.replace(second=0)
+        return parsed
+
+    raise ValueError(f"Unrecognized time: {value}")
+
+
+def get_or_create_participant(db: Session, name: str, created: set[str] | None = None) -> Participant:
+    clean_name = name.strip()
+    participant = db.scalar(select(Participant).where(Participant.name == clean_name))
+    if participant:
+        return participant
+
+    participant = Participant(name=clean_name)
+    db.add(participant)
+    db.flush()
+    if created is not None:
+        created.add(clean_name)
+    return participant
+
+
+def get_or_create_preset(db: Session, amount: str | int, created: set[int] | None = None) -> AmountPreset:
+    cents = amount_to_cents(amount)
+    preset = db.scalar(select(AmountPreset).where(AmountPreset.amount_cents == cents))
+    if preset:
+        return preset
+
+    preset = AmountPreset(amount_cents=cents)
+    db.add(preset)
+    db.flush()
+    if created is not None:
+        created.add(cents)
+    return preset
+
+
+def claimed_total_cents(record: RedPacketRecord) -> int:
+    return sum(claim.amount_cents for claim in record.claims)
+
+
+def serialize_record_list_item(record: RedPacketRecord) -> dict:
+    return {
+        "id": record.id,
+        "legacy_id": record.legacy_id,
+        "time": record.time,
+        "sender_id": record.sender_id,
+        "sender_name": record.sender.name,
+        "total_amount": cents_to_amount(record.total_amount_cents),
+        "claimed_amount": cents_to_amount(claimed_total_cents(record)),
+        "claim_count": len(record.claims),
+        "note": record.note,
+        "status": record.status,
+    }
+
+
+def serialize_record_detail(record: RedPacketRecord) -> dict:
+    data = serialize_record_list_item(record)
+    data["claims"] = [
+        {
+            "id": claim.id,
+            "participant_id": claim.participant_id,
+            "participant_name": claim.participant.name,
+            "amount": cents_to_amount(claim.amount_cents),
+        }
+        for claim in record.claims
+    ]
+    return data
+
+
+def create_record(db: Session, payload: RecordCreate) -> RedPacketRecord:
+    sender = db.get(Participant, payload.sender_id)
+    if sender is None:
+        raise ValueError("Sender does not exist")
+
+    status = payload.status
+    if status not in {item.value for item in RecordStatus}:
+        raise ValueError("Invalid status")
+
+    participant_ids = [claim.participant_id for claim in payload.claims]
+    participants = db.scalars(select(Participant).where(Participant.id.in_(participant_ids))).all()
+    found_ids = {participant.id for participant in participants}
+    missing_ids = set(participant_ids) - found_ids
+    if missing_ids:
+        raise ValueError(f"Claim participant does not exist: {sorted(missing_ids)}")
+
+    record = RedPacketRecord(
+        time=payload.time or datetime.utcnow(),
+        sender_id=payload.sender_id,
+        total_amount_cents=amount_to_cents(payload.total_amount),
+        note=payload.note.strip(),
+        status=status,
+        approved_at=datetime.utcnow() if status == RecordStatus.approved.value else None,
+    )
+    db.add(record)
+    db.flush()
+
+    for index, claim in enumerate(payload.claims):
+        db.add(
+            RedPacketClaim(
+                record_id=record.id,
+                participant_id=claim.participant_id,
+                amount_cents=amount_to_cents(claim.amount),
+                sort_order=index,
+            )
+        )
+
+    get_or_create_preset(db, payload.total_amount)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def get_record_query():
+    return (
+        select(RedPacketRecord)
+        .options(
+            selectinload(RedPacketRecord.sender),
+            selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),
+        )
+        .order_by(RedPacketRecord.time.desc(), RedPacketRecord.id.desc())
+    )
+
+
+def build_summary(db: Session) -> dict:
+    approved_records = db.scalars(
+        select(RedPacketRecord)
+        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .options(selectinload(RedPacketRecord.claims))
+    ).all()
+
+    pending_count = db.scalar(
+        select(func.count()).select_from(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.pending.value)
+    )
+    participant_count = db.scalar(select(func.count()).select_from(Participant).where(Participant.is_active.is_(True)))
+
+    total_sent = sum(record.total_amount_cents for record in approved_records)
+    total_claimed = sum(claimed_total_cents(record) for record in approved_records)
+
+    return {
+        "record_count": len(approved_records),
+        "participant_count": participant_count or 0,
+        "total_sent_amount": cents_to_amount(total_sent),
+        "total_claimed_amount": cents_to_amount(total_claimed),
+        "pending_count": pending_count or 0,
+    }
+
+
+def build_user_stats(db: Session) -> list[dict]:
+    participants = db.scalars(select(Participant).order_by(Participant.name)).all()
+    stats = {
+        item.id: {
+            "participant_id": item.id,
+            "name": item.name,
+            "send_count": 0,
+            "send_amount_cents": 0,
+            "receive_count": 0,
+            "receive_amount_cents": 0,
+        }
+        for item in participants
+    }
+
+    records = db.scalars(
+        select(RedPacketRecord)
+        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .options(selectinload(RedPacketRecord.sender), selectinload(RedPacketRecord.claims))
+    ).all()
+
+    for record in records:
+        sender_stats = stats.setdefault(
+            record.sender_id,
+            {
+                "participant_id": record.sender_id,
+                "name": record.sender.name,
+                "send_count": 0,
+                "send_amount_cents": 0,
+                "receive_count": 0,
+                "receive_amount_cents": 0,
+            },
+        )
+        sender_stats["send_count"] += 1
+        sender_stats["send_amount_cents"] += record.total_amount_cents
+
+        for claim in record.claims:
+            receiver_stats = stats[claim.participant_id]
+            receiver_stats["receive_count"] += 1
+            receiver_stats["receive_amount_cents"] += claim.amount_cents
+
+    rows = []
+    for item in stats.values():
+        total_count = item["send_count"] + item["receive_count"]
+        receive_count = item["receive_count"]
+        pnl = item["receive_amount_cents"] - item["send_amount_cents"]
+        average_cents = (
+            int((Decimal(item["receive_amount_cents"]) / Decimal(receive_count)).quantize(Decimal("1"), ROUND_HALF_UP))
+            if receive_count
+            else 0
+        )
+        rows.append(
+            {
+                "participant_id": item["participant_id"],
+                "name": item["name"],
+                "send_count": item["send_count"],
+                "send_amount": cents_to_amount(item["send_amount_cents"]),
+                "receive_count": receive_count,
+                "receive_amount": cents_to_amount(item["receive_amount_cents"]),
+                "average_receive_amount": cents_to_amount(average_cents),
+                "pnl_amount": cents_to_amount(pnl),
+                "send_ratio": f"{item['send_count'] / total_count * 100:.1f}%" if total_count else "-",
+                "_pnl_cents": pnl,
+            }
+        )
+
+    rows.sort(key=lambda row: (-row["_pnl_cents"], row["name"]))
+    for row in rows:
+        row.pop("_pnl_cents")
+    return rows
+
+
+def build_trends(db: Session) -> list[dict]:
+    records = db.scalars(
+        select(RedPacketRecord)
+        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .options(
+            selectinload(RedPacketRecord.sender),
+            selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),
+        )
+        .order_by(RedPacketRecord.time.asc(), RedPacketRecord.id.asc())
+    ).all()
+
+    balances: defaultdict[int, int] = defaultdict(int)
+    points = []
+    for record in records:
+        balances[record.sender_id] -= record.total_amount_cents
+        points.append(
+            {
+                "record_id": record.id,
+                "time": record.time,
+                "participant_id": record.sender_id,
+                "participant_name": record.sender.name,
+                "pnl_amount": cents_to_amount(balances[record.sender_id]),
+            }
+        )
+
+        for claim in record.claims:
+            balances[claim.participant_id] += claim.amount_cents
+            points.append(
+                {
+                    "record_id": record.id,
+                    "time": record.time,
+                    "participant_id": claim.participant_id,
+                    "participant_name": claim.participant.name,
+                    "pnl_amount": cents_to_amount(balances[claim.participant_id]),
+                }
+            )
+
+    return points
+
+
+def reset_imported_data(db: Session) -> None:
+    db.execute(delete(RedPacketClaim))
+    db.execute(delete(RedPacketRecord))
+    db.execute(delete(AmountPreset))
+    db.execute(delete(Participant))
+    db.commit()
+
+
+def import_json_data(db: Session, source_path: str, reset: bool = False) -> ImportReport:
+    path = Path(source_path)
+    if not path.is_absolute():
+        path = (Path(__file__).parent / path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+
+    if reset:
+        reset_imported_data(db)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    created_participants: set[str] = set()
+    created_presets: set[int] = set()
+    records_imported = 0
+    records_skipped = 0
+    claims_imported = 0
+    amount_mismatches = 0
+    errors: list[str] = []
+
+    for name in raw.get("users", []):
+        if str(name).strip():
+            get_or_create_participant(db, str(name), created_participants)
+
+    for amount in raw.get("amount_history", []):
+        try:
+            get_or_create_preset(db, amount, created_presets)
+        except ValueError as exc:
+            errors.append(f"Invalid amount preset {amount}: {exc}")
+
+    for item in raw.get("records", []):
+        legacy_id = item.get("id")
+        if legacy_id and db.scalar(select(RedPacketRecord).where(RedPacketRecord.legacy_id == legacy_id)):
+            records_skipped += 1
+            continue
+
+        try:
+            sender = get_or_create_participant(db, str(item["sender"]), created_participants)
+            total_cents = amount_to_cents(item["total_amount"])
+            record = RedPacketRecord(
+                legacy_id=legacy_id,
+                time=parse_record_time(item.get("time")),
+                sender_id=sender.id,
+                total_amount_cents=total_cents,
+                note=str(item.get("note", "") or ""),
+                status=RecordStatus.approved.value,
+                approved_at=parse_record_time(item.get("time")),
+            )
+            db.add(record)
+            db.flush()
+
+            claim_total = 0
+            for index, claim in enumerate(item.get("claims", [])):
+                participant = get_or_create_participant(db, str(claim["user"]), created_participants)
+                amount_cents = amount_to_cents(claim["amount"])
+                claim_total += amount_cents
+                db.add(
+                    RedPacketClaim(
+                        record_id=record.id,
+                        participant_id=participant.id,
+                        amount_cents=amount_cents,
+                        sort_order=index,
+                    )
+                )
+                claims_imported += 1
+
+            if claim_total != total_cents:
+                amount_mismatches += 1
+
+            get_or_create_preset(db, item["total_amount"], created_presets)
+            records_imported += 1
+        except (KeyError, ValueError) as exc:
+            errors.append(f"Record {legacy_id or '<missing id>'}: {exc}")
+
+    db.commit()
+    return ImportReport(
+        participants_created=len(created_participants),
+        presets_created=len(created_presets),
+        records_imported=records_imported,
+        records_skipped=records_skipped,
+        claims_imported=claims_imported,
+        amount_mismatches=amount_mismatches,
+        errors=errors,
+    )
