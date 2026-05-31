@@ -33,6 +33,14 @@ export type UserStatsItem = {
   send_ratio: string
 }
 
+export type TrendPoint = {
+  record_id: number
+  time: string
+  participant_id: number
+  participant_name: string
+  pnl_amount: string
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`)
 
@@ -53,4 +61,8 @@ export function getRecentRecords(limit = 6) {
 
 export function getUserStats() {
   return getJson<UserStatsItem[]>('/stats/users')
+}
+
+export function getTrendPoints() {
+  return getJson<TrendPoint[]>('/stats/trends')
 }
