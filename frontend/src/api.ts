@@ -20,6 +20,12 @@ export type RecordListItem = {
   claim_count: number
   note: string
   status: string
+  created_by_user_id: number | null
+}
+
+export type RecordListResponse = {
+  items: RecordListItem[]
+  total: number
 }
 
 export type ClaimRead = {
@@ -108,7 +114,11 @@ export type RecordCreatePayload = {
 export type RecordQuery = {
   status?: string
   senderId?: string
+  receiverId?: string
   search?: string
+  dateFrom?: string
+  dateTo?: string
+  offset?: number
   limit?: number
 }
 
@@ -192,10 +202,21 @@ export function getRecentRecords(limit = 6) {
 export function getRecords(query: RecordQuery = {}) {
   const params = new URLSearchParams()
   params.set('limit', String(query.limit ?? 30))
+  params.set('offset', String(query.offset ?? 0))
   if (query.status) params.set('status', query.status)
   if (query.senderId) params.set('sender_id', query.senderId)
+  if (query.receiverId) params.set('receiver_id', query.receiverId)
   if (query.search) params.set('search', query.search)
-  return getJson<RecordListItem[]>(`/records?${params.toString()}`)
+  if (query.dateFrom) params.set('date_from', query.dateFrom)
+  if (query.dateTo) params.set('date_to', query.dateTo)
+  return getJson<RecordListResponse>(`/records?${params.toString()}`)
+}
+
+export function getMyRecords(query: Pick<RecordQuery, 'offset' | 'limit'> = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(query.limit ?? 30))
+  params.set('offset', String(query.offset ?? 0))
+  return getJson<RecordListResponse>(`/records/my?${params.toString()}`)
 }
 
 export function getRecord(recordId: number) {
@@ -212,6 +233,10 @@ export function getTrendPoints() {
 
 export function getParticipants() {
   return getJson<Participant[]>('/participants')
+}
+
+export function createParticipant(name: string) {
+  return postJson<Participant, { name: string }>('/participants', { name })
 }
 
 export function getAmountPresets() {

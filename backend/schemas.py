@@ -92,10 +92,16 @@ class RecordListItem(BaseModel):
     claim_count: int
     note: str
     status: str
+    created_by_user_id: int | None = None
 
 
 class RecordDetail(RecordListItem):
     claims: list[ClaimRead]
+
+
+class RecordListResponse(BaseModel):
+    items: list[RecordListItem]
+    total: int
 
 
 class SummaryStats(BaseModel):

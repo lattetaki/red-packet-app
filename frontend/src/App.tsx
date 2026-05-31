@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import {
   approveRecord,
   createAppUser,
+  createParticipant,
   createRecord,
   deleteRecord,
   getAmountPresets,
@@ -28,6 +29,7 @@ import {
   getParticipants,
   getRecord,
   getRecords,
+  getMyRecords,
   getRecentRecords,
   getSummaryStats,
   getTrendPoints,
@@ -89,6 +91,7 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
 
 const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records'])
 const savedUserKey = 'red-packet-current-user'
+const senderDefaultsKey = 'red-packet-sender-default-amounts'
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 
@@ -117,9 +120,23 @@ function formatRole(role: AppUser['role']) {
   return labels[role]
 }
 
+function formatStatus(status: string) {
+  const labels: Record<string, string> = {
+    approved: '已审核',
+    pending: '待审核',
+    rejected: '已驳回',
+  }
+  return labels[status] ?? status
+}
+
 function toNumber(value: string) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
+}
+
+function toRatioNumber(value: string) {
+  if (value === '-') return -1
+  return toNumber(value.replace('%', ''))
 }
 
 function currentDateTimeLocal() {
@@ -158,6 +175,17 @@ function readSavedSession() {
   } catch {
     window.localStorage.removeItem(savedUserKey)
     return null
+  }
+}
+
+function readSenderDefaults() {
+  const raw = window.localStorage.getItem(senderDefaultsKey)
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw) as Record<string, string>
+  } catch {
+    window.localStorage.removeItem(senderDefaultsKey)
+    return {}
   }
 }
 
@@ -254,7 +282,11 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
   const [records, setRecords] = useState<RecordListItem[]>([])
+  const [recordTotal, setRecordTotal] = useState(0)
+  const [recordLimit, setRecordLimit] = useState(30)
   const [pendingRecords, setPendingRecords] = useState<RecordListItem[]>([])
+  const [myRecords, setMyRecords] = useState<RecordListItem[]>([])
+  const [myRecordTotal, setMyRecordTotal] = useState(0)
   const [userStats, setUserStats] = useState<UserStatsItem[]>([])
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
@@ -271,7 +303,9 @@ function App() {
   const [userManageError, setUserManageError] = useState<string | null>(null)
   const [savingAppUserId, setSavingAppUserId] = useState<number | 'new' | null>(null)
   const [amountPresets, setAmountPresets] = useState<AmountPreset[]>([])
+  const [senderDefaultAmounts, setSenderDefaultAmounts] = useState<Record<string, string>>(() => readSenderDefaults())
   const [selectedTrendUserIds, setSelectedTrendUserIds] = useState<Set<number>>(new Set())
+  const [selectedStatsUserId, setSelectedStatsUserId] = useState('')
   const [entryTime, setEntryTime] = useState(currentDateTimeLocal())
   const [senderId, setSenderId] = useState('')
   const [totalAmount, setTotalAmount] = useState('10')
@@ -280,9 +314,17 @@ function App() {
   const [entryMessage, setEntryMessage] = useState<string | null>(null)
   const [entryError, setEntryError] = useState<string | null>(null)
   const [savingEntry, setSavingEntry] = useState(false)
+  const [newParticipantName, setNewParticipantName] = useState('')
+  const [participantMessage, setParticipantMessage] = useState<string | null>(null)
+  const [participantError, setParticipantError] = useState<string | null>(null)
+  const [savingParticipant, setSavingParticipant] = useState(false)
   const [recordSearch, setRecordSearch] = useState('')
   const [recordSenderFilter, setRecordSenderFilter] = useState('')
+  const [recordReceiverFilter, setRecordReceiverFilter] = useState('')
   const [recordStatusFilter, setRecordStatusFilter] = useState('approved')
+  const [recordDateFrom, setRecordDateFrom] = useState('')
+  const [recordDateTo, setRecordDateTo] = useState('')
+  const [recordEditMode, setRecordEditMode] = useState(false)
   const [selectedRecord, setSelectedRecord] = useState<RecordDetail | null>(null)
   const [recordDraftTime, setRecordDraftTime] = useState('')
   const [recordDraftSenderId, setRecordDraftSenderId] = useState('')
@@ -308,10 +350,11 @@ function App() {
   const isAdmin = currentRole === 'admin'
 
   const loadDashboardData = useCallback(async () => {
-    const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
+    const [summaryData, recordData, pendingRecordData, myRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
-      isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve([]),
+      isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve({ items: [], total: 0 }),
+      getMyRecords({ limit: 10 }),
       getUserStats(),
       getTrendPoints(),
       getParticipants(),
@@ -320,8 +363,11 @@ function App() {
     ])
 
     setSummary(summaryData)
-    setRecords(recordData)
-    setPendingRecords(pendingRecordData)
+    setRecords(recordData.items)
+    setRecordTotal(recordData.total)
+    setPendingRecords(pendingRecordData.items)
+    setMyRecords(myRecordData.items)
+    setMyRecordTotal(myRecordData.total)
     setUserStats(userStatsData)
     setTrendPoints(trendData)
     setParticipants(participantData)
@@ -346,17 +392,27 @@ function App() {
 
   async function loadRecordList() {
     const data = await getRecords({
-      limit: 30,
+      limit: recordLimit,
       status: isAdmin ? recordStatusFilter || undefined : 'approved',
       senderId: recordSenderFilter || undefined,
+      receiverId: recordReceiverFilter || undefined,
       search: recordSearch || undefined,
+      dateFrom: recordDateFrom ? new Date(recordDateFrom).toISOString() : undefined,
+      dateTo: recordDateTo ? new Date(`${recordDateTo}T23:59:59`).toISOString() : undefined,
     })
-    setRecords(data)
+    setRecords(data.items)
+    setRecordTotal(data.total)
   }
 
   async function loadPendingRecords() {
     const data = await getRecords({ status: 'pending', limit: 100 })
-    setPendingRecords(data)
+    setPendingRecords(data.items)
+  }
+
+  async function loadMyRecords() {
+    const data = await getMyRecords({ limit: 10 })
+    setMyRecords(data.items)
+    setMyRecordTotal(data.total)
   }
 
   async function handleLogin() {
@@ -461,6 +517,27 @@ function App() {
     }
   }
 
+  async function addParticipant() {
+    setParticipantMessage(null)
+    setParticipantError(null)
+    if (!newParticipantName.trim()) {
+      setParticipantError('请输入参与者名称。')
+      return
+    }
+
+    try {
+      setSavingParticipant(true)
+      await createParticipant(newParticipantName.trim())
+      setNewParticipantName('')
+      setParticipantMessage('参与者已新增，可用于发包和抢包选择。')
+      await loadDashboardData()
+    } catch {
+      setParticipantError('新增参与者失败，请确认名称没有重复。')
+    } finally {
+      setSavingParticipant(false)
+    }
+  }
+
   useEffect(() => {
     let active = true
 
@@ -476,9 +553,9 @@ function App() {
         if (active) {
           setApiError(null)
         }
-      } catch {
+      } catch (error) {
         if (active) {
-          setApiError('后端暂未连接，当前页面只显示空状态。')
+          setApiError(error instanceof Error && error.message.includes('401') ? '登录已过期，请重新登录。' : '后端暂未连接，当前页面只显示空状态。')
         }
       } finally {
         if (active) {
@@ -537,9 +614,86 @@ function App() {
   )
 
   const latestTrendByUser = buildLatestTrendByUser(trendPoints)
+  const selectedStatsUser = selectedStatsUserId ? userStats.find((item) => String(item.participant_id) === selectedStatsUserId) : undefined
   const maxAbsPnl = Math.max(1, ...userStats.map((item) => Math.abs(toNumber(item.pnl_amount))))
   const claimTotal = sumClaimAmounts(entryClaims)
   const amountMismatch = Math.abs(claimTotal - toNumber(totalAmount)) > 0.001
+
+  function getUserRank(user: UserStatsItem, metric: keyof UserStatsItem | 'send_ratio_number') {
+    const value = metric === 'send_ratio_number' ? toRatioNumber(user.send_ratio) : toNumber(String(user[metric]))
+    const rank = 1 + userStats.filter((item) => {
+      const otherValue = metric === 'send_ratio_number' ? toRatioNumber(item.send_ratio) : toNumber(String(item[metric]))
+      return otherValue > value
+    }).length
+    return `当前第 ${rank} / ${userStats.length}`
+  }
+
+  function renderPersonalStats(user: UserStatsItem) {
+    const metrics = [
+      { label: '发包数', value: user.send_count, rank: getUserRank(user, 'send_count'), color: 'bg-violet-500' },
+      { label: '抢包数', value: user.receive_count, rank: getUserRank(user, 'receive_count'), color: 'bg-violet-500' },
+      { label: '发包金额', value: formatMoney(user.send_amount), raw: toNumber(user.send_amount), rank: getUserRank(user, 'send_amount'), color: 'bg-blue-500' },
+      { label: '抢包金额', value: formatMoney(user.receive_amount), raw: toNumber(user.receive_amount), rank: getUserRank(user, 'receive_amount'), color: 'bg-emerald-500' },
+      {
+        label: '平均每包',
+        value: formatMoney(user.average_receive_amount),
+        raw: toNumber(user.average_receive_amount),
+        rank: getUserRank(user, 'average_receive_amount'),
+        color: 'bg-amber-500',
+      },
+      {
+        label: '盈亏',
+        value: formatMoney(user.pnl_amount),
+        raw: Math.abs(toNumber(user.pnl_amount)),
+        rank: getUserRank(user, 'pnl_amount'),
+        color: toNumber(user.pnl_amount) >= 0 ? 'bg-emerald-500' : 'bg-red-500',
+      },
+    ]
+    const maxMetric = Math.max(1, ...metrics.map((item) => Number(item.raw ?? item.value) || 0))
+
+    return (
+      <div className="border-b border-slate-100 p-5">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {[
+            { label: '发包金额', value: formatMoney(user.send_amount), rank: getUserRank(user, 'send_amount') },
+            { label: '抢包金额', value: formatMoney(user.receive_amount), rank: getUserRank(user, 'receive_amount') },
+            { label: '盈亏', value: formatMoney(user.pnl_amount), rank: getUserRank(user, 'pnl_amount') },
+            { label: '平均每包', value: formatMoney(user.average_receive_amount), rank: getUserRank(user, 'average_receive_amount') },
+          ].map((item) => (
+            <div key={item.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">{item.label}</p>
+              <p className="mt-2 text-2xl font-semibold">{item.value}</p>
+              <p className="mt-2 text-xs text-slate-500">{item.rank}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-5 rounded-lg border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold">个人详细指标</h3>
+          <div className="mt-4 space-y-4">
+            {metrics.map((item) => {
+              const width = `${Math.max(3, ((Number(item.raw ?? item.value) || 0) / maxMetric) * 100)}%`
+
+              return (
+                <div key={item.label} className="grid gap-2 md:grid-cols-[92px_1fr_180px] md:items-center">
+                  <span className="text-sm text-slate-600">{item.label}</span>
+                  <div className="h-7 rounded-lg bg-slate-100 p-1">
+                    <div className={`h-full rounded-md ${item.color}`} style={{ width }} />
+                  </div>
+                  <span className="text-sm text-slate-600 md:text-right">
+                    {item.value} <span className="text-slate-400">{item.rank}</span>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+          <p className="mt-5 text-sm text-slate-500">
+            对局发包率：{user.send_ratio}（{getUserRank(user, 'send_ratio_number')}）
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   function renderLogin() {
     return (
@@ -618,7 +772,7 @@ function App() {
 
   function resetEntryForm(keepPeople = true) {
     setEntryTime(currentDateTimeLocal())
-    setTotalAmount('10')
+    setTotalAmount(senderDefaultAmounts[senderId] ?? '10')
     setNote('')
     setEntryMessage(null)
     setEntryError(null)
@@ -631,6 +785,7 @@ function App() {
   function handleSenderChange(nextSenderId: string) {
     const previousSenderId = senderId
     setSenderId(nextSenderId)
+    setTotalAmount(senderDefaultAmounts[nextSenderId] ?? '10')
 
     if (!previousSenderId || !nextSenderId) {
       return
@@ -672,6 +827,10 @@ function App() {
       setEntryError('抢包明细需要同时选择用户并填写金额。')
       return
     }
+    if (new Set(claims.map((claim) => claim.participant_id)).size !== claims.length) {
+      setEntryError('同一个抢包人不能重复出现。')
+      return
+    }
 
     if (Math.abs(sumClaimAmounts(entryClaims) - toNumber(totalAmount)) > 0.001) {
       const confirmed = window.confirm(`红包总额为 ${formatMoney(totalAmount)}，抢包明细合计为 ¥${sumClaimAmounts(entryClaims).toFixed(2)}，仍然保存吗？`)
@@ -692,7 +851,13 @@ function App() {
     try {
       setSavingEntry(true)
       await createRecord(payload)
+      setSenderDefaultAmounts((current) => {
+        const next = { ...current, [senderId]: totalAmount }
+        window.localStorage.setItem(senderDefaultsKey, JSON.stringify(next))
+        return next
+      })
       await loadDashboardData()
+      await loadMyRecords()
       resetEntryForm(true)
       setEntryMessage(isAdmin ? '记录已保存，并已进入统计。' : '记录已提交，等待管理员审核后进入统计。')
     } catch {
@@ -708,6 +873,7 @@ function App() {
     try {
       const record = await getRecord(recordId)
       setSelectedRecord(record)
+      setRecordEditMode(false)
       setRecordDraftTime(toDateTimeLocal(record.time))
       setRecordDraftSenderId(String(record.sender_id))
       setRecordDraftTotal(record.total_amount)
@@ -743,6 +909,10 @@ function App() {
 
     if (!recordDraftSenderId || claims.length === 0 || claims.some((claim) => !claim.participant_id || !claim.amount)) {
       setRecordError('请完整填写发包人和抢包明细。')
+      return
+    }
+    if (new Set(claims.map((claim) => claim.participant_id)).size !== claims.length) {
+      setRecordError('同一个抢包人不能重复出现。')
       return
     }
 
@@ -782,8 +952,12 @@ function App() {
       return
     }
     if (!selectedRecord) return
-    const confirmed = window.confirm(`确定删除这条记录吗？\n\n时间：${formatTime(selectedRecord.time)}\n发包人：${selectedRecord.sender_name}`)
-    if (!confirmed) return
+    const confirmation = window.prompt(
+      `删除后无法在页面恢复。\n\n时间：${formatTime(selectedRecord.time)}\n发包人：${selectedRecord.sender_name}\n总额：${formatMoney(
+        selectedRecord.total_amount,
+      )}\n\n请输入“删除”确认。`,
+    )
+    if (confirmation !== '删除') return
 
     try {
       await deleteRecord(selectedRecord.id)
@@ -799,6 +973,8 @@ function App() {
   async function reviewRecord(recordId: number, action: 'approve' | 'reject') {
     setReviewMessage(null)
     setReviewError(null)
+    const confirmed = window.confirm(action === 'approve' ? '确认通过这条待审核记录吗？' : '确认驳回这条待审核记录吗？')
+    if (!confirmed) return
     try {
       setReviewingRecordId(recordId)
       if (action === 'approve') {
@@ -883,9 +1059,26 @@ function App() {
 
         <section className="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-100 px-5 py-4">
-            <h2 className="text-base font-semibold">全员统计</h2>
-            <p className="mt-1 text-sm text-slate-500">显示全部参与人，后续这里会升级为可筛选的独立统计页。</p>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold">全员统计</h2>
+                <p className="mt-1 text-sm text-slate-500">选择一个用户查看个人概览。</p>
+              </div>
+              <select
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={selectedStatsUserId}
+                onChange={(event) => setSelectedStatsUserId(event.target.value)}
+              >
+                <option value="">全体</option>
+                {userStats.map((user) => (
+                  <option key={user.participant_id} value={user.participant_id}>
+                    {user.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
+          {selectedStatsUser ? renderPersonalStats(selectedStatsUser) : null}
           {renderStatsTable()}
         </section>
 
@@ -1118,7 +1311,7 @@ function App() {
               }`}
             >
               明细合计 ¥{claimTotal.toFixed(2)}
-              {amountMismatch ? '，与总额不一致，保存前请确认。' : '，与总额一致。'}
+              {amountMismatch ? `，与总额相差 ¥${Math.abs(toNumber(totalAmount) - claimTotal).toFixed(2)}，保存前请确认。` : '，与总额一致。'}
             </div>
 
             {entryError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{entryError}</div> : null}
@@ -1147,6 +1340,46 @@ function App() {
           <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
             当前名单共有 {participants.length} 人，金额预设 {amountPresets.map((preset) => `¥${preset.amount}`).join(' / ') || '暂无'}。
           </div>
+
+          <div className="mt-5 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <h3 className="text-sm font-semibold">我的提交</h3>
+              <Button variant="outline" size="xs" onClick={loadMyRecords}>
+                刷新
+              </Button>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {myRecords.length === 0 ? (
+                <div className="px-4 py-4 text-sm text-slate-500">暂无由当前账号提交的记录。</div>
+              ) : (
+                myRecords.map((record) => (
+                  <button
+                    key={record.id}
+                    type="button"
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm hover:bg-slate-50"
+                    onClick={() => openRecord(record.id)}
+                  >
+                    <span>
+                      <span className="font-medium">{record.sender_name}</span>
+                      <span className="ml-2 text-slate-500">{formatTime(record.time)}</span>
+                    </span>
+                    <span
+                      className={`rounded-md px-2 py-1 text-xs font-medium ${
+                        record.status === 'approved'
+                          ? 'bg-emerald-50 text-emerald-700'
+                          : record.status === 'pending'
+                            ? 'bg-amber-50 text-amber-700'
+                            : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      {formatStatus(record.status)}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">共 {myRecordTotal} 条</div>
+          </div>
         </div>
       </section>
     )
@@ -1163,6 +1396,7 @@ function App() {
 
     const draftClaimTotal = sumClaimAmounts(recordDraftClaims)
     const draftMismatch = Math.abs(draftClaimTotal - toNumber(recordDraftTotal)) > 0.001
+    const canEditRecord = isAdmin && recordEditMode
 
     return (
       <aside className="rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -1175,6 +1409,11 @@ function App() {
             <Button variant="outline" size="sm" onClick={() => setSelectedRecord(null)}>
               关闭
             </Button>
+            {isAdmin ? (
+              <Button variant={recordEditMode ? 'outline' : 'default'} size="sm" onClick={() => setRecordEditMode((current) => !current)}>
+                {recordEditMode ? '退出编辑' : '编辑'}
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -1191,7 +1430,7 @@ function App() {
               type="datetime-local"
               value={recordDraftTime}
               onChange={(event) => setRecordDraftTime(event.target.value)}
-              disabled={!isAdmin}
+              disabled={!canEditRecord}
             />
           </label>
 
@@ -1202,7 +1441,7 @@ function App() {
                 className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordDraftSenderId}
                 onChange={(event) => setRecordDraftSenderId(event.target.value)}
-                disabled={!isAdmin}
+                disabled={!canEditRecord}
               >
                 {participants.map((participant) => (
                   <option key={participant.id} value={participant.id}>
@@ -1218,7 +1457,7 @@ function App() {
                 className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordDraftStatus}
                 onChange={(event) => setRecordDraftStatus(event.target.value as 'approved' | 'pending' | 'rejected')}
-                disabled={!isAdmin}
+                disabled={!canEditRecord}
               >
                 <option value="approved">已审核</option>
                 <option value="pending">待审核</option>
@@ -1233,7 +1472,7 @@ function App() {
               className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
               value={recordDraftTotal}
               onChange={(event) => setRecordDraftTotal(event.target.value)}
-              disabled={!isAdmin}
+              disabled={!canEditRecord}
             />
           </label>
 
@@ -1243,14 +1482,14 @@ function App() {
               className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
               value={recordDraftNote}
               onChange={(event) => setRecordDraftNote(event.target.value)}
-              disabled={!isAdmin}
+              disabled={!canEditRecord}
             />
           </label>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-slate-500">抢包明细</span>
-              {isAdmin ? (
+              {canEditRecord ? (
                 <Button
                   variant="outline"
                   size="xs"
@@ -1263,7 +1502,7 @@ function App() {
             </div>
 
             {recordDraftClaims.map((claim) => (
-              <div key={claim.id} className={`grid gap-2 ${isAdmin ? 'grid-cols-[1fr_92px_56px]' : 'grid-cols-[1fr_92px]'}`}>
+              <div key={claim.id} className={`grid gap-2 ${canEditRecord ? 'grid-cols-[1fr_92px_56px]' : 'grid-cols-[1fr_92px]'}`}>
                 <select
                   className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                   value={claim.participantId}
@@ -1272,7 +1511,7 @@ function App() {
                       current.map((item) => (item.id === claim.id ? { ...item, participantId: event.target.value } : item)),
                     )
                   }
-                  disabled={!isAdmin}
+                  disabled={!canEditRecord}
                 >
                   <option value="">请选择</option>
                   {participants.map((participant) => (
@@ -1289,9 +1528,9 @@ function App() {
                       current.map((item) => (item.id === claim.id ? { ...item, amount: event.target.value } : item)),
                     )
                   }
-                  disabled={!isAdmin}
+                  disabled={!canEditRecord}
                 />
-                {isAdmin ? (
+                {canEditRecord ? (
                   <Button
                     variant="outline"
                     size="sm"
@@ -1315,7 +1554,7 @@ function App() {
             {draftMismatch ? '，与总额不一致。' : '，与总额一致。'}
           </div>
 
-          {isAdmin ? (
+          {canEditRecord ? (
             <div className="grid grid-cols-2 gap-2">
               <Button variant="outline" onClick={deleteSelectedRecord}>
                 删除记录
@@ -1326,7 +1565,7 @@ function App() {
             </div>
           ) : (
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-              当前账号为只读权限，可查看记录明细，不能修改或删除。
+              {isAdmin ? '当前为查看模式，点击“编辑”后可修改或删除。' : '当前账号为只读权限，可查看记录明细，不能修改或删除。'}
             </div>
           )}
         </div>
@@ -1351,7 +1590,7 @@ function App() {
               </Button>
             </div>
 
-            <div className={`mt-4 grid gap-3 ${isAdmin ? 'md:grid-cols-[1fr_160px_140px]' : 'md:grid-cols-[1fr_160px]'}`}>
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               <input
                 className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordSearch}
@@ -1370,6 +1609,30 @@ function App() {
                   </option>
                 ))}
               </select>
+              <select
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={recordReceiverFilter}
+                onChange={(event) => setRecordReceiverFilter(event.target.value)}
+              >
+                <option value="">全部抢包人</option>
+                {participants.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                type="date"
+                value={recordDateFrom}
+                onChange={(event) => setRecordDateFrom(event.target.value)}
+              />
+              <input
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                type="date"
+                value={recordDateTo}
+                onChange={(event) => setRecordDateTo(event.target.value)}
+              />
               {isAdmin ? (
                 <select
                   className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
@@ -1414,6 +1677,33 @@ function App() {
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-sm text-slate-500">
+            <span>
+              已显示 {records.length} / {recordTotal} 条
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={records.length >= recordTotal}
+              onClick={async () => {
+                const nextLimit = recordLimit + 30
+                setRecordLimit(nextLimit)
+                const data = await getRecords({
+                  limit: nextLimit,
+                  status: isAdmin ? recordStatusFilter || undefined : 'approved',
+                  senderId: recordSenderFilter || undefined,
+                  receiverId: recordReceiverFilter || undefined,
+                  search: recordSearch || undefined,
+                  dateFrom: recordDateFrom ? new Date(recordDateFrom).toISOString() : undefined,
+                  dateTo: recordDateTo ? new Date(`${recordDateTo}T23:59:59`).toISOString() : undefined,
+                })
+                setRecords(data.items)
+                setRecordTotal(data.total)
+              }}
+            >
+              加载更多
+            </Button>
           </div>
         </div>
 
@@ -1487,6 +1777,18 @@ function App() {
                       </Button>
                     </div>
                   </div>
+                  {selectedRecord?.id === record.id ? (
+                    <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="grid gap-2 text-sm sm:grid-cols-2">
+                        {selectedRecord.claims.map((claim) => (
+                          <div key={claim.id} className="flex items-center justify-between rounded-md bg-white px-3 py-2">
+                            <span className="font-medium">{claim.participant_name}</span>
+                            <span>{formatMoney(claim.amount)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </article>
               ))}
             </div>
@@ -1515,6 +1817,9 @@ function App() {
           </div>
 
           <div className="border-b border-slate-100 p-5">
+            <div className="mb-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
+              当前密码不会以明文保存，因此不能查看原密码；需要知道密码时，请在这里重置为一个新密码并自行记录。
+            </div>
             <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_150px_92px]">
               <input
                 className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
@@ -1571,6 +1876,7 @@ function App() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {appUsers.map((user) => {
+                  const isSelf = currentUser?.id === user.id
                   const draft = appUserDrafts[user.id] ?? {
                     displayName: user.display_name,
                     role: user.role,
@@ -1597,6 +1903,7 @@ function App() {
                         <select
                           className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                           value={draft.role}
+                          disabled={isSelf}
                           onChange={(event) =>
                             setAppUserDrafts((current) => ({
                               ...current,
@@ -1614,6 +1921,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={draft.isActive}
+                            disabled={isSelf}
                             onChange={(event) =>
                               setAppUserDrafts((current) => ({
                                 ...current,
@@ -1655,6 +1963,26 @@ function App() {
           <div className="border-b border-slate-100 px-5 py-4">
             <h2 className="text-base font-semibold">发包/抢包用户名单</h2>
             <p className="mt-1 text-sm text-slate-500">这些用户来自现有数据，录入时作为发包人与抢包人的预设选择。</p>
+          </div>
+
+          <div className="border-b border-slate-100 p-5">
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                className="h-10 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={newParticipantName}
+                onChange={(event) => setNewParticipantName(event.target.value)}
+                placeholder="新增参与者名称"
+              />
+              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={addParticipant} disabled={savingParticipant}>
+                {savingParticipant ? '新增中' : '新增参与者'}
+              </Button>
+            </div>
+            {participantError ? (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{participantError}</div>
+            ) : null}
+            {participantMessage ? (
+              <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{participantMessage}</div>
+            ) : null}
           </div>
 
           <div className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-3">

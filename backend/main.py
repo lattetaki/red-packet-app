@@ -4,13 +4,13 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, require_admin
 from database import SessionLocal, create_db_and_tables, get_db
-from models import AmountPreset, AppUser, Participant, RecordStatus, RedPacketRecord
+from models import AmountPreset, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
@@ -25,6 +25,7 @@ from schemas import (
     ParticipantRead,
     RecordCreate,
     RecordDetail,
+    RecordListResponse,
     RecordUpdate,
     RecordListItem,
     SummaryStats,
@@ -134,13 +135,22 @@ def create_app_user(payload: AppUserCreate, _: AppUser = Depends(require_admin),
 
 
 @app.put("/admin/app-users/{user_id}", response_model=AppUserRead)
-def update_app_user(user_id: int, payload: AppUserUpdate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+def update_app_user(user_id: int, payload: AppUserUpdate, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.role not in VALID_APP_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
 
     user = db.get(AppUser, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.id == current_user.id and (payload.role != AppRole.admin.value or not payload.is_active):
+        raise HTTPException(status_code=400, detail="Cannot remove your own admin access")
+
+    if user.role == AppRole.admin.value and (payload.role != AppRole.admin.value or not payload.is_active):
+        active_admin_count = db.scalar(
+            select(func.count()).select_from(AppUser).where(AppUser.role == AppRole.admin.value, AppUser.is_active.is_(True))
+        )
+        if active_admin_count is not None and active_admin_count <= 1:
+            raise HTTPException(status_code=400, detail="At least one active admin is required")
 
     user.display_name = payload.display_name.strip()
     user.role = payload.role
@@ -162,13 +172,15 @@ def list_amount_presets(_: AppUser = Depends(get_current_user), db: Session = De
     ]
 
 
-@app.get("/records", response_model=list[RecordListItem])
+@app.get("/records", response_model=RecordListResponse)
 def list_records(
     status: str | None = Query(default=None),
     sender_id: int | None = Query(default=None),
+    receiver_id: int | None = Query(default=None),
     search: str | None = Query(default=None),
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=500),
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -180,6 +192,8 @@ def list_records(
         query = query.where(RedPacketRecord.status == status)
     if sender_id:
         query = query.where(RedPacketRecord.sender_id == sender_id)
+    if receiver_id:
+        query = query.where(RedPacketRecord.claims.any(RedPacketClaim.participant_id == receiver_id))
     if date_from:
         query = query.where(RedPacketRecord.time >= date_from)
     if date_to:
@@ -189,8 +203,22 @@ def list_records(
         query = query.join(RedPacketRecord.sender).where(
             or_(RedPacketRecord.note.ilike(pattern), Participant.name.ilike(pattern), RedPacketRecord.legacy_id.ilike(pattern))
         )
-    records = db.scalars(query.limit(limit)).all()
-    return [serialize_record_list_item(record) for record in records]
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    records = db.scalars(query.offset(offset).limit(limit)).all()
+    return {"items": [serialize_record_list_item(record) for record in records], "total": total}
+
+
+@app.get("/records/my", response_model=RecordListResponse)
+def list_my_records(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=30, ge=1, le=100),
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = get_record_query().where(RedPacketRecord.created_by_user_id == current_user.id)
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    records = db.scalars(query.offset(offset).limit(limit)).all()
+    return {"items": [serialize_record_list_item(record) for record in records], "total": total}
 
 
 @app.post("/records", response_model=RecordDetail)
@@ -198,7 +226,7 @@ def add_record(payload: RecordCreate, current_user: AppUser = Depends(get_curren
     if current_user.role != "admin":
         payload.status = RecordStatus.pending.value
     try:
-        record = create_record(db, payload)
+        record = create_record(db, payload, created_by_user_id=current_user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -211,7 +239,7 @@ def get_record(record_id: int, current_user: AppUser = Depends(get_current_user)
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
-    if current_user.role != "admin" and record.status != RecordStatus.approved.value:
+    if current_user.role != "admin" and record.status != RecordStatus.approved.value and record.created_by_user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Record not found")
     return serialize_record_detail(record)
 

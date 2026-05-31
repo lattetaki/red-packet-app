@@ -154,6 +154,7 @@ def serialize_record_list_item(record: RedPacketRecord) -> dict:
         "claim_count": len(record.claims),
         "note": record.note,
         "status": record.status,
+        "created_by_user_id": record.created_by_user_id,
     }
 
 
@@ -171,7 +172,7 @@ def serialize_record_detail(record: RedPacketRecord) -> dict:
     return data
 
 
-def create_record(db: Session, payload: RecordCreate) -> RedPacketRecord:
+def create_record(db: Session, payload: RecordCreate, created_by_user_id: int | None = None) -> RedPacketRecord:
     sender = db.get(Participant, payload.sender_id)
     if sender is None:
         raise ValueError("Sender does not exist")
@@ -193,6 +194,7 @@ def create_record(db: Session, payload: RecordCreate) -> RedPacketRecord:
         total_amount_cents=amount_to_cents(payload.total_amount),
         note=payload.note.strip(),
         status=status,
+        created_by_user_id=created_by_user_id,
         approved_at=datetime.utcnow() if status == RecordStatus.approved.value else None,
     )
     db.add(record)
