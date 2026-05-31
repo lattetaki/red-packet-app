@@ -41,6 +41,30 @@ export type TrendPoint = {
   pnl_amount: string
 }
 
+export type Participant = {
+  id: number
+  name: string
+  is_active: boolean
+}
+
+export type AmountPreset = {
+  id: number
+  amount: string
+  is_active: boolean
+}
+
+export type RecordCreatePayload = {
+  time?: string
+  sender_id: number
+  total_amount: string
+  note: string
+  status: 'approved' | 'pending'
+  claims: Array<{
+    participant_id: number
+    amount: string
+  }>
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`)
 
@@ -49,6 +73,22 @@ async function getJson<T>(path: string): Promise<T> {
   }
 
   return response.json() as Promise<T>
+}
+
+async function postJson<TResponse, TPayload>(path: string, payload: TPayload): Promise<TResponse> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<TResponse>
 }
 
 export function getSummaryStats() {
@@ -65,4 +105,16 @@ export function getUserStats() {
 
 export function getTrendPoints() {
   return getJson<TrendPoint[]>('/stats/trends')
+}
+
+export function getParticipants() {
+  return getJson<Participant[]>('/participants')
+}
+
+export function getAmountPresets() {
+  return getJson<AmountPreset[]>('/amount-presets')
+}
+
+export function createRecord(payload: RecordCreatePayload) {
+  return postJson<RecordListItem, RecordCreatePayload>('/records', payload)
 }
