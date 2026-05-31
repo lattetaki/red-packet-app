@@ -8,17 +8,19 @@ import {
   Gift,
   Home,
   LockKeyhole,
+  LogOut,
   ListChecks,
   Plus,
   Search,
   Users,
 } from 'lucide-react'
 import type { ElementType } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
   approveRecord,
+  createAppUser,
   createRecord,
   deleteRecord,
   getAmountPresets,
@@ -30,7 +32,10 @@ import {
   getSummaryStats,
   getTrendPoints,
   getUserStats,
+  login,
   type AppUser,
+  type AppUserCreatePayload,
+  type AppUserUpdatePayload,
   type AmountPreset,
   type Participant,
   type RecordCreatePayload,
@@ -40,6 +45,7 @@ import {
   type TrendPoint,
   type UserStatsItem,
   rejectRecord,
+  updateAppUser,
   updateRecord,
 } from './api'
 import './App.css'
@@ -59,6 +65,13 @@ type EntryClaim = {
   amount: string
 }
 
+type AppUserDraft = {
+  displayName: string
+  role: AppUser['role']
+  isActive: boolean
+  password: string
+}
+
 const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '首页', icon: Home, key: 'dashboard' },
   { label: '录入', icon: Plus, key: 'entry' },
@@ -68,8 +81,8 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '数据导入', icon: Database, key: 'import' },
 ]
 
-const currentRole: 'admin' | 'viewer' | 'contributor' = 'admin'
-const adminOnlyViews = new Set<ViewKey>(['review', 'users', 'import'])
+const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records'])
+const savedUserKey = 'red-packet-current-user'
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 
@@ -120,6 +133,20 @@ function toDateTimeLocal(value: string) {
 
 function newClaim(participantId = ''): EntryClaim {
   return { id: crypto.randomUUID(), participantId, amount: '' }
+}
+
+function readSavedUser() {
+  const raw = window.localStorage.getItem(savedUserKey)
+  if (!raw) {
+    return null
+  }
+
+  try {
+    return JSON.parse(raw) as AppUser
+  } catch {
+    window.localStorage.removeItem(savedUserKey)
+    return null
+  }
 }
 
 function sumClaimAmounts(claims: EntryClaim[]) {
@@ -211,6 +238,7 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
 }
 
 function App() {
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => readSavedUser())
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
   const [records, setRecords] = useState<RecordListItem[]>([])
@@ -219,6 +247,17 @@ function App() {
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [appUsers, setAppUsers] = useState<AppUser[]>([])
+  const [appUserDrafts, setAppUserDrafts] = useState<Record<number, AppUserDraft>>({})
+  const [newAppUser, setNewAppUser] = useState<AppUserCreatePayload>({
+    username: '',
+    display_name: '',
+    password: '',
+    role: 'viewer',
+    is_active: true,
+  })
+  const [userManageMessage, setUserManageMessage] = useState<string | null>(null)
+  const [userManageError, setUserManageError] = useState<string | null>(null)
+  const [savingAppUserId, setSavingAppUserId] = useState<number | 'new' | null>(null)
   const [amountPresets, setAmountPresets] = useState<AmountPreset[]>([])
   const [selectedTrendUserIds, setSelectedTrendUserIds] = useState<Set<number>>(new Set())
   const [entryTime, setEntryTime] = useState(currentDateTimeLocal())
@@ -245,10 +284,17 @@ function App() {
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [reviewingRecordId, setReviewingRecordId] = useState<number | null>(null)
   const [savingRecord, setSavingRecord] = useState(false)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const [loggingIn, setLoggingIn] = useState(false)
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
 
-  async function loadDashboardData() {
+  const currentRole = currentUser?.role ?? 'viewer'
+  const isAdmin = currentRole === 'admin'
+
+  const loadDashboardData = useCallback(async () => {
     const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
@@ -257,7 +303,7 @@ function App() {
       getTrendPoints(),
       getParticipants(),
       getAmountPresets(),
-      currentRole === 'admin' ? getAppUsers() : Promise.resolve([]),
+      isAdmin ? getAppUsers() : Promise.resolve([]),
     ])
 
     setSummary(summaryData)
@@ -268,14 +314,27 @@ function App() {
     setParticipants(participantData)
     setAmountPresets(presetData)
     setAppUsers(appUserData)
+    setAppUserDrafts(
+      Object.fromEntries(
+        appUserData.map((user) => [
+          user.id,
+          {
+            displayName: user.display_name,
+            role: user.role,
+            isActive: user.is_active,
+            password: '',
+          },
+        ]),
+      ),
+    )
     setSelectedTrendUserIds((current) => (current.size ? current : new Set(userStatsData.map((item) => item.participant_id))))
     setSenderId((current) => current || String(participantData[0]?.id ?? ''))
-  }
+  }, [isAdmin])
 
   async function loadRecordList() {
     const data = await getRecords({
       limit: 30,
-      status: recordStatusFilter || undefined,
+      status: isAdmin ? recordStatusFilter || undefined : 'approved',
       senderId: recordSenderFilter || undefined,
       search: recordSearch || undefined,
     })
@@ -287,10 +346,114 @@ function App() {
     setPendingRecords(data)
   }
 
+  async function handleLogin() {
+    setLoginError(null)
+    if (!loginUsername.trim() || !loginPassword) {
+      setLoginError('请输入用户名和密码。')
+      return
+    }
+
+    try {
+      setLoggingIn(true)
+      const user = await login(loginUsername.trim(), loginPassword)
+      window.localStorage.setItem(savedUserKey, JSON.stringify(user))
+      setCurrentUser(user)
+      setActiveView('dashboard')
+      setLoginPassword('')
+    } catch {
+      setLoginError('用户名或密码不正确。')
+    } finally {
+      setLoggingIn(false)
+    }
+  }
+
+  function handleLogout() {
+    window.localStorage.removeItem(savedUserKey)
+    setCurrentUser(null)
+    setActiveView('dashboard')
+    setSelectedRecord(null)
+  }
+
+  async function createLoginAccount() {
+    setUserManageMessage(null)
+    setUserManageError(null)
+
+    if (!newAppUser.username.trim() || !newAppUser.display_name.trim() || !newAppUser.password) {
+      setUserManageError('新增账号需要填写用户名、显示名称和初始密码。')
+      return
+    }
+
+    try {
+      setSavingAppUserId('new')
+      await createAppUser({
+        ...newAppUser,
+        username: newAppUser.username.trim(),
+        display_name: newAppUser.display_name.trim(),
+      })
+      setNewAppUser({ username: '', display_name: '', password: '', role: 'viewer', is_active: true })
+      setUserManageMessage('登录账号已新增。')
+      await loadDashboardData()
+    } catch {
+      setUserManageError('新增账号失败，请确认用户名没有重复。')
+    } finally {
+      setSavingAppUserId(null)
+    }
+  }
+
+  async function saveLoginAccount(user: AppUser) {
+    const draft = appUserDrafts[user.id]
+    if (!draft) return
+
+    setUserManageMessage(null)
+    setUserManageError(null)
+    if (!draft.displayName.trim()) {
+      setUserManageError('显示名称不能为空。')
+      return
+    }
+
+    const payload: AppUserUpdatePayload = {
+      display_name: draft.displayName.trim(),
+      role: draft.role,
+      is_active: draft.isActive,
+    }
+    if (draft.password) {
+      payload.password = draft.password
+    }
+
+    try {
+      setSavingAppUserId(user.id)
+      const updated = await updateAppUser(user.id, payload)
+      setAppUsers((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      setAppUserDrafts((current) => ({
+        ...current,
+        [updated.id]: {
+          displayName: updated.display_name,
+          role: updated.role,
+          isActive: updated.is_active,
+          password: '',
+        },
+      }))
+      if (currentUser?.id === updated.id) {
+        window.localStorage.setItem(savedUserKey, JSON.stringify(updated))
+        setCurrentUser(updated)
+      }
+      setUserManageMessage(draft.password ? '账号信息和密码已更新。' : '账号信息已更新。')
+    } catch {
+      setUserManageError('保存账号失败。')
+    } finally {
+      setSavingAppUserId(null)
+    }
+  }
+
   useEffect(() => {
     let active = true
 
     async function load() {
+      if (!currentUser) {
+        setLoading(false)
+        return
+      }
+
       try {
         setLoading(true)
         await loadDashboardData()
@@ -313,7 +476,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [])
+  }, [currentUser, loadDashboardData])
 
   const summaryItems: SummaryItem[] = useMemo(
     () => [
@@ -349,6 +512,69 @@ function App() {
   const maxAbsPnl = Math.max(1, ...userStats.map((item) => Math.abs(toNumber(item.pnl_amount))))
   const claimTotal = sumClaimAmounts(entryClaims)
   const amountMismatch = Math.abs(claimTotal - toNumber(totalAmount)) > 0.001
+
+  function renderLogin() {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#f5f7fb] px-4 text-slate-950">
+        <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex size-11 items-center justify-center rounded-lg bg-red-600 text-white shadow-sm">
+              <Gift className="size-5" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold">红包履历统计</h1>
+              <p className="mt-1 text-sm text-slate-500">登录后进入 Web 工作台</p>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-4">
+            <label className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">用户名</span>
+              <input
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={loginUsername}
+                onChange={(event) => setLoginUsername(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void handleLogin()
+                  }
+                }}
+                autoComplete="username"
+              />
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">密码</span>
+              <input
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                type="password"
+                value={loginPassword}
+                onChange={(event) => setLoginPassword(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void handleLogin()
+                  }
+                }}
+                autoComplete="current-password"
+              />
+            </label>
+
+            {loginError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{loginError}</div> : null}
+
+            <Button className="w-full bg-slate-950 text-white hover:bg-slate-800" onClick={handleLogin} disabled={loggingIn}>
+              {loggingIn ? '登录中' : '登录'}
+            </Button>
+          </div>
+
+          <div className="mt-5 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">
+            普通用户只能查看首页、提交录入和查看已审核记录；管理员可以审核、管理用户和维护数据。
+          </div>
+        </section>
+      </main>
+    )
+  }
 
   function toggleTrendUser(participantId: number) {
     setSelectedTrendUserIds((current) => {
@@ -431,7 +657,7 @@ function App() {
       sender_id: Number(senderId),
       total_amount: totalAmount,
       note,
-      status: 'approved',
+      status: isAdmin ? 'approved' : 'pending',
       claims,
     }
 
@@ -440,7 +666,7 @@ function App() {
       await createRecord(payload)
       await loadDashboardData()
       resetEntryForm(true)
-      setEntryMessage('记录已保存，并已进入统计。')
+      setEntryMessage(isAdmin ? '记录已保存，并已进入统计。' : '记录已提交，等待管理员审核后进入统计。')
     } catch {
       setEntryError('保存失败，请检查金额和用户选择。')
     } finally {
@@ -472,6 +698,10 @@ function App() {
   }
 
   async function saveSelectedRecord() {
+    if (!isAdmin) {
+      setRecordError('普通用户只能查看明细，不能修改记录。')
+      return
+    }
     if (!selectedRecord) return
     setRecordMessage(null)
     setRecordError(null)
@@ -519,6 +749,10 @@ function App() {
   }
 
   async function deleteSelectedRecord() {
+    if (!isAdmin) {
+      setRecordError('普通用户只能查看明细，不能删除记录。')
+      return
+    }
     if (!selectedRecord) return
     const confirmed = window.confirm(`确定删除这条记录吗？\n\n时间：${formatTime(selectedRecord.time)}\n发包人：${selectedRecord.sender_name}`)
     if (!confirmed) return
@@ -724,7 +958,9 @@ function App() {
         <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-100 px-5 py-4">
             <h2 className="text-base font-semibold">快速录入</h2>
-            <p className="mt-1 text-sm text-slate-500">当前仅管理员可录入；后续可开放协作录入并进入审核。</p>
+            <p className="mt-1 text-sm text-slate-500">
+              {isAdmin ? '管理员录入会直接进入统计。' : '普通用户提交后进入审核，通过后才会进入统计。'}
+            </p>
           </div>
 
           <div className="space-y-4 p-5">
@@ -867,7 +1103,7 @@ function App() {
                 清空当前输入
               </Button>
               <Button className="flex-1 bg-slate-950 text-white hover:bg-slate-800" onClick={submitEntry} disabled={savingEntry}>
-                {savingEntry ? '保存中' : '保存并进入统计'}
+                {savingEntry ? '保存中' : isAdmin ? '保存并进入统计' : '提交审核'}
               </Button>
             </div>
           </div>
@@ -876,7 +1112,9 @@ function App() {
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-base font-semibold">录入说明</h2>
           <p className="mt-2 text-sm leading-6 text-slate-500">
-            这版先按管理员录入保存为已审核记录，因此会立刻进入统计。后续开放协作录入时，其他用户提交的记录会保存为待审核。
+            {isAdmin
+              ? '管理员录入保存为已审核记录，因此会立刻进入统计。'
+              : '普通用户可以协助录入，但记录会先保存为待审核，管理员通过后才会进入首页统计。'}
           </p>
           <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
             当前名单共有 {participants.length} 人，金额预设 {amountPresets.map((preset) => `¥${preset.amount}`).join(' / ') || '暂无'}。
@@ -890,7 +1128,7 @@ function App() {
     if (!selectedRecord) {
       return (
         <aside className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
-          双击左侧任意记录查看明细。这里会显示主记录和抢包明细，并支持编辑、保存和删除。
+          单击左侧任意记录查看明细。管理员可编辑和删除，普通用户只查看。
         </aside>
       )
     }
@@ -925,6 +1163,7 @@ function App() {
               type="datetime-local"
               value={recordDraftTime}
               onChange={(event) => setRecordDraftTime(event.target.value)}
+              disabled={!isAdmin}
             />
           </label>
 
@@ -935,6 +1174,7 @@ function App() {
                 className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordDraftSenderId}
                 onChange={(event) => setRecordDraftSenderId(event.target.value)}
+                disabled={!isAdmin}
               >
                 {participants.map((participant) => (
                   <option key={participant.id} value={participant.id}>
@@ -950,6 +1190,7 @@ function App() {
                 className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordDraftStatus}
                 onChange={(event) => setRecordDraftStatus(event.target.value as 'approved' | 'pending' | 'rejected')}
+                disabled={!isAdmin}
               >
                 <option value="approved">已审核</option>
                 <option value="pending">待审核</option>
@@ -964,6 +1205,7 @@ function App() {
               className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
               value={recordDraftTotal}
               onChange={(event) => setRecordDraftTotal(event.target.value)}
+              disabled={!isAdmin}
             />
           </label>
 
@@ -973,24 +1215,27 @@ function App() {
               className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
               value={recordDraftNote}
               onChange={(event) => setRecordDraftNote(event.target.value)}
+              disabled={!isAdmin}
             />
           </label>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-slate-500">抢包明细</span>
-              <Button
-                variant="outline"
-                size="xs"
-                onClick={() => setRecordDraftClaims((current) => [...current, newClaim()])}
-              >
-                <Plus className="size-3" />
-                加一行
-              </Button>
+              {isAdmin ? (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => setRecordDraftClaims((current) => [...current, newClaim()])}
+                >
+                  <Plus className="size-3" />
+                  加一行
+                </Button>
+              ) : null}
             </div>
 
             {recordDraftClaims.map((claim) => (
-              <div key={claim.id} className="grid grid-cols-[1fr_92px_56px] gap-2">
+              <div key={claim.id} className={`grid gap-2 ${isAdmin ? 'grid-cols-[1fr_92px_56px]' : 'grid-cols-[1fr_92px]'}`}>
                 <select
                   className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                   value={claim.participantId}
@@ -999,6 +1244,7 @@ function App() {
                       current.map((item) => (item.id === claim.id ? { ...item, participantId: event.target.value } : item)),
                     )
                   }
+                  disabled={!isAdmin}
                 >
                   <option value="">请选择</option>
                   {participants.map((participant) => (
@@ -1015,16 +1261,19 @@ function App() {
                       current.map((item) => (item.id === claim.id ? { ...item, amount: event.target.value } : item)),
                     )
                   }
+                  disabled={!isAdmin}
                 />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    setRecordDraftClaims((current) => (current.length <= 1 ? current : current.filter((item) => item.id !== claim.id)))
-                  }
-                >
-                  删除
-                </Button>
+                {isAdmin ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setRecordDraftClaims((current) => (current.length <= 1 ? current : current.filter((item) => item.id !== claim.id)))
+                    }
+                  >
+                    删除
+                  </Button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -1038,14 +1287,20 @@ function App() {
             {draftMismatch ? '，与总额不一致。' : '，与总额一致。'}
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Button variant="outline" onClick={deleteSelectedRecord}>
-              删除记录
-            </Button>
-            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveSelectedRecord} disabled={savingRecord}>
-              {savingRecord ? '保存中' : '保存修改'}
-            </Button>
-          </div>
+          {isAdmin ? (
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="outline" onClick={deleteSelectedRecord}>
+                删除记录
+              </Button>
+              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveSelectedRecord} disabled={savingRecord}>
+                {savingRecord ? '保存中' : '保存修改'}
+              </Button>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              当前账号为只读权限，可查看记录明细，不能修改或删除。
+            </div>
+          )}
         </div>
       </aside>
     )
@@ -1059,14 +1314,16 @@ function App() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-base font-semibold">记录列表</h2>
-                <p className="mt-1 text-sm text-slate-500">双击记录可查看明细并编辑。</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {isAdmin ? '单击记录可查看明细并编辑。' : '普通用户只能查看已审核记录和明细。'}
+                </p>
               </div>
               <Button variant="outline" size="sm" onClick={loadRecordList}>
                 筛选
               </Button>
             </div>
 
-            <div className="mt-4 grid gap-3 md:grid-cols-[1fr_160px_140px]">
+            <div className={`mt-4 grid gap-3 ${isAdmin ? 'md:grid-cols-[1fr_160px_140px]' : 'md:grid-cols-[1fr_160px]'}`}>
               <input
                 className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={recordSearch}
@@ -1085,16 +1342,18 @@ function App() {
                   </option>
                 ))}
               </select>
-              <select
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                value={recordStatusFilter}
-                onChange={(event) => setRecordStatusFilter(event.target.value)}
-              >
-                <option value="approved">已审核</option>
-                <option value="pending">待审核</option>
-                <option value="rejected">已驳回</option>
-                <option value="">全部状态</option>
-              </select>
+              {isAdmin ? (
+                <select
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  value={recordStatusFilter}
+                  onChange={(event) => setRecordStatusFilter(event.target.value)}
+                >
+                  <option value="approved">已审核</option>
+                  <option value="pending">待审核</option>
+                  <option value="rejected">已驳回</option>
+                  <option value="">全部状态</option>
+                </select>
+              ) : null}
             </div>
           </div>
 
@@ -1220,44 +1479,145 @@ function App() {
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
             <div>
               <h2 className="text-base font-semibold">网页访问账号</h2>
-              <p className="mt-1 text-sm text-slate-500">当前只初始化管理员与只读访问账号，密码不在页面中显示。</p>
+              <p className="mt-1 text-sm text-slate-500">管理员可新增账号、调整权限、启停账号和重置密码。</p>
             </div>
             <Button variant="outline" size="sm" onClick={loadDashboardData}>
               刷新
             </Button>
           </div>
 
+          <div className="border-b border-slate-100 p-5">
+            <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_150px_92px]">
+              <input
+                className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={newAppUser.username}
+                onChange={(event) => setNewAppUser((current) => ({ ...current, username: event.target.value }))}
+                placeholder="用户名"
+              />
+              <input
+                className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={newAppUser.display_name}
+                onChange={(event) => setNewAppUser((current) => ({ ...current, display_name: event.target.value }))}
+                placeholder="显示名称"
+              />
+              <input
+                className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                type="password"
+                value={newAppUser.password}
+                onChange={(event) => setNewAppUser((current) => ({ ...current, password: event.target.value }))}
+                placeholder="初始密码"
+              />
+              <select
+                className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={newAppUser.role}
+                onChange={(event) => setNewAppUser((current) => ({ ...current, role: event.target.value as AppUser['role'] }))}
+              >
+                <option value="viewer">只读用户</option>
+                <option value="contributor">协助录入</option>
+                <option value="admin">管理员</option>
+              </select>
+              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={createLoginAccount} disabled={savingAppUserId === 'new'}>
+                {savingAppUserId === 'new' ? '新增中' : '新增'}
+              </Button>
+            </div>
+
+            {userManageError ? (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{userManageError}</div>
+            ) : null}
+            {userManageMessage ? (
+              <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{userManageMessage}</div>
+            ) : null}
+          </div>
+
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] text-left text-sm">
+            <table className="w-full min-w-[960px] text-left text-sm">
               <thead className="bg-slate-50 text-xs font-medium text-slate-500">
                 <tr>
                   <th className="px-5 py-3">用户名</th>
                   <th className="px-5 py-3">显示名称</th>
                   <th className="px-5 py-3">角色</th>
                   <th className="px-5 py-3">状态</th>
-                  <th className="px-5 py-3">说明</th>
+                  <th className="px-5 py-3">新密码</th>
+                  <th className="px-5 py-3">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {appUsers.map((user) => (
-                  <tr key={user.id}>
-                    <td className="px-5 py-3 font-medium">{user.username}</td>
-                    <td className="px-5 py-3 text-slate-600">{user.display_name}</td>
-                    <td className="px-5 py-3">
-                      <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{formatRole(user.role)}</span>
-                    </td>
-                    <td className="px-5 py-3">
-                      <span
-                        className={`rounded-md px-2 py-1 text-xs font-medium ${
-                          user.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                        }`}
-                      >
-                        {user.is_active ? '启用' : '停用'}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-slate-500">{user.role === 'admin' ? '可管理记录、审核和系统数据' : '只能查看数据与明细'}</td>
-                  </tr>
-                ))}
+                {appUsers.map((user) => {
+                  const draft = appUserDrafts[user.id] ?? {
+                    displayName: user.display_name,
+                    role: user.role,
+                    isActive: user.is_active,
+                    password: '',
+                  }
+
+                  return (
+                    <tr key={user.id}>
+                      <td className="px-5 py-3 font-medium">{user.username}</td>
+                      <td className="px-5 py-3">
+                        <input
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                          value={draft.displayName}
+                          onChange={(event) =>
+                            setAppUserDrafts((current) => ({
+                              ...current,
+                              [user.id]: { ...draft, displayName: event.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="px-5 py-3">
+                        <select
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                          value={draft.role}
+                          onChange={(event) =>
+                            setAppUserDrafts((current) => ({
+                              ...current,
+                              [user.id]: { ...draft, role: event.target.value as AppUser['role'] },
+                            }))
+                          }
+                        >
+                          <option value="viewer">只读用户</option>
+                          <option value="contributor">协助录入</option>
+                          <option value="admin">管理员</option>
+                        </select>
+                      </td>
+                      <td className="px-5 py-3">
+                        <label className="inline-flex items-center gap-2 text-sm text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={draft.isActive}
+                            onChange={(event) =>
+                              setAppUserDrafts((current) => ({
+                                ...current,
+                                [user.id]: { ...draft, isActive: event.target.checked },
+                              }))
+                            }
+                          />
+                          {draft.isActive ? '启用' : '停用'}
+                        </label>
+                      </td>
+                      <td className="px-5 py-3">
+                        <input
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                          type="password"
+                          value={draft.password}
+                          onChange={(event) =>
+                            setAppUserDrafts((current) => ({
+                              ...current,
+                              [user.id]: { ...draft, password: event.target.value },
+                            }))
+                          }
+                          placeholder="留空不修改"
+                        />
+                      </td>
+                      <td className="px-5 py-3">
+                        <Button variant="outline" size="sm" onClick={() => saveLoginAccount(user)} disabled={savingAppUserId === user.id}>
+                          {savingAppUserId === user.id ? '保存中' : '保存'}
+                        </Button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -1333,6 +1693,9 @@ function App() {
   }
 
   function renderActiveView() {
+    if (!isAdmin && !viewerVisibleViews.has(activeView)) {
+      return renderDashboard()
+    }
     if (activeView === 'entry') {
       return renderEntry()
     }
@@ -1349,6 +1712,10 @@ function App() {
       return renderImport()
     }
     return renderDashboard()
+  }
+
+  if (!currentUser) {
+    return renderLogin()
   }
 
   return (
@@ -1368,7 +1735,7 @@ function App() {
 
             <nav className="mt-8 space-y-1">
               {navItems.map((item) => {
-                if (adminOnlyViews.has(item.key) && currentRole !== 'admin') {
+                if (!isAdmin && !viewerVisibleViews.has(item.key)) {
                   return null
                 }
                 const Icon = item.icon
@@ -1393,9 +1760,9 @@ function App() {
             </nav>
 
             <div className="mt-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <p className="text-sm font-medium text-slate-900">迁移准备</p>
+              <p className="text-sm font-medium text-slate-900">{currentUser.display_name}</p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                旧 JSON 已能导入 SQLite。新记录审核通过后才进入统计。
+                当前权限：{formatRole(currentUser.role)}。{isAdmin ? '可管理审核与系统数据。' : '只能查看和提交待审核记录。'}
               </p>
             </div>
           </div>
@@ -1421,7 +1788,11 @@ function App() {
                 </Button>
                 <Button className="bg-red-600 text-white hover:bg-red-700" onClick={() => setActiveView('entry')}>
                   <LockKeyhole className="size-4" />
-                  管理员录入
+                  {isAdmin ? '管理员录入' : '提交录入'}
+                </Button>
+                <Button variant="outline" onClick={handleLogout}>
+                  <LogOut className="size-4" />
+                  退出
                 </Button>
               </div>
             </div>

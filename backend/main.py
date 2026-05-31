@@ -8,14 +8,18 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from auth import hash_password
 from database import SessionLocal, create_db_and_tables, get_db
 from models import AmountPreset, AppUser, Participant, RecordStatus, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
+    AppUserCreate,
     AppUserRead,
+    AppUserUpdate,
     ImportReport,
     ImportRequest,
+    LoginRequest,
     ParticipantCreate,
     ParticipantRead,
     RecordCreate,
@@ -27,6 +31,7 @@ from schemas import (
     UserStatsItem,
 )
 from services import (
+    authenticate_app_user,
     build_summary,
     build_trends,
     build_user_stats,
@@ -39,6 +44,9 @@ from services import (
     serialize_record_list_item,
     update_record,
 )
+
+
+VALID_APP_ROLES = {"admin", "viewer", "contributor"}
 
 
 @asynccontextmanager
@@ -71,6 +79,14 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/auth/login", response_model=AppUserRead)
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = authenticate_app_user(db, payload.username, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return user
+
+
 @app.get("/participants", response_model=list[ParticipantRead])
 def list_participants(db: Session = Depends(get_db)):
     return db.scalars(select(Participant).order_by(Participant.name)).all()
@@ -92,6 +108,48 @@ def create_participant(payload: ParticipantCreate, db: Session = Depends(get_db)
 @app.get("/admin/app-users", response_model=list[AppUserRead])
 def list_app_users(db: Session = Depends(get_db)):
     return db.scalars(select(AppUser).order_by(AppUser.role, AppUser.username)).all()
+
+
+@app.post("/admin/app-users", response_model=AppUserRead)
+def create_app_user(payload: AppUserCreate, db: Session = Depends(get_db)):
+    if payload.role not in VALID_APP_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    user = AppUser(
+        username=payload.username.strip(),
+        display_name=payload.display_name.strip(),
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        is_active=payload.is_active,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Username already exists") from exc
+    db.refresh(user)
+    return user
+
+
+@app.put("/admin/app-users/{user_id}", response_model=AppUserRead)
+def update_app_user(user_id: int, payload: AppUserUpdate, db: Session = Depends(get_db)):
+    if payload.role not in VALID_APP_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    user = db.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.display_name = payload.display_name.strip()
+    user.role = payload.role
+    user.is_active = payload.is_active
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
+
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 @app.get("/amount-presets", response_model=list[AmountPresetRead])

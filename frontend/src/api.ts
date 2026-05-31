@@ -72,6 +72,21 @@ export type AppUser = {
   is_active: boolean
 }
 
+export type AppUserCreatePayload = {
+  username: string
+  display_name: string
+  password: string
+  role: AppUser['role']
+  is_active: boolean
+}
+
+export type AppUserUpdatePayload = {
+  display_name: string
+  password?: string
+  role: AppUser['role']
+  is_active: boolean
+}
+
 export type RecordCreatePayload = {
   time?: string
   sender_id: number
@@ -149,6 +164,10 @@ export function getSummaryStats() {
   return getJson<SummaryStats>('/stats/summary')
 }
 
+export function login(username: string, password: string) {
+  return postJson<AppUser, { username: string; password: string }>('/auth/login', { username, password })
+}
+
 export function getRecentRecords(limit = 6) {
   return getRecords({ limit, status: 'approved' })
 }
@@ -184,6 +203,14 @@ export function getAmountPresets() {
 
 export function getAppUsers() {
   return getJson<AppUser[]>('/admin/app-users')
+}
+
+export function createAppUser(payload: AppUserCreatePayload) {
+  return postJson<AppUser, AppUserCreatePayload>('/admin/app-users', payload)
+}
+
+export function updateAppUser(userId: number, payload: AppUserUpdatePayload) {
+  return putJson<AppUser, AppUserUpdatePayload>(`/admin/app-users/${userId}`, payload)
 }
 
 export function createRecord(payload: RecordCreatePayload) {

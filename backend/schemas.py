@@ -31,6 +31,26 @@ class AppUserRead(BaseModel):
     is_active: bool
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=120)
+
+
+class AppUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=120)
+    role: str = "viewer"
+    is_active: bool = True
+
+
+class AppUserUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    role: str = "viewer"
+    is_active: bool = True
+    password: str = ""
+
+
 class ClaimCreate(BaseModel):
     participant_id: int
     amount: str

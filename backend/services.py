@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from auth import hash_password
+from auth import hash_password, verify_password
 from models import AmountPreset, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import amount_to_cents, cents_to_amount
 from schemas import ImportReport, RecordCreate, RecordUpdate
@@ -26,7 +26,7 @@ INITIAL_APP_USERS = (
     {
         "username": "包局",
         "display_name": "包局",
-        "password": "守护二次元",
+        "password": "kskbl",
         "role": AppRole.viewer.value,
     },
     {
@@ -79,6 +79,15 @@ def ensure_participant_setup(db: Session) -> None:
         participant.is_active = True
 
     db.commit()
+
+
+def authenticate_app_user(db: Session, username: str, password: str) -> AppUser | None:
+    user = db.scalar(select(AppUser).where(AppUser.username == username.strip()))
+    if user is None or not user.is_active:
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
+    return user
 
 
 def parse_record_time(value: str | None) -> datetime:
