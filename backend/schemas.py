@@ -21,6 +21,16 @@ class AmountPresetRead(BaseModel):
     is_active: bool
 
 
+class AppUserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    display_name: str
+    role: str
+    is_active: bool
+
+
 class ClaimCreate(BaseModel):
     participant_id: int
     amount: str

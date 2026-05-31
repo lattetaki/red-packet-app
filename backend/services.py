@@ -4,10 +4,11 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from models import AmountPreset, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
+from auth import hash_password
+from models import AmountPreset, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import amount_to_cents, cents_to_amount
 from schemas import ImportReport, RecordCreate, RecordUpdate
 
@@ -20,6 +21,64 @@ TIME_PATTERNS = (
     "%Y-%m-%d",
     "%Y/%m/%d",
 )
+
+INITIAL_APP_USERS = (
+    {
+        "username": "包局",
+        "display_name": "包局",
+        "password": "守护二次元",
+        "role": AppRole.viewer.value,
+    },
+    {
+        "username": "white",
+        "display_name": "white",
+        "password": "whiteadmin",
+        "role": AppRole.admin.value,
+    },
+)
+
+INITIAL_PARTICIPANTS = ("sheep", "white", "堃堃", "小周", "小熙", "小韬", "帅少", "怠惰", "李哥", "牢保", "老功")
+
+
+def ensure_app_user_setup(db: Session) -> None:
+    columns = {row[1] for row in db.execute(text("PRAGMA table_info(app_users)"))}
+    if "password_hash" not in columns:
+        db.execute(text("ALTER TABLE app_users ADD COLUMN password_hash VARCHAR(255) DEFAULT ''"))
+        db.commit()
+
+    for item in INITIAL_APP_USERS:
+        user = db.scalar(select(AppUser).where(AppUser.username == item["username"]))
+        if user is None:
+            db.add(
+                AppUser(
+                    username=item["username"],
+                    display_name=item["display_name"],
+                    password_hash=hash_password(item["password"]),
+                    role=item["role"],
+                    is_active=True,
+                )
+            )
+            continue
+
+        user.display_name = item["display_name"]
+        user.role = item["role"]
+        user.is_active = True
+        if not user.password_hash:
+            user.password_hash = hash_password(item["password"])
+
+    db.commit()
+
+
+def ensure_participant_setup(db: Session) -> None:
+    for name in INITIAL_PARTICIPANTS:
+        participant = db.scalar(select(Participant).where(Participant.name == name))
+        if participant is None:
+            db.add(Participant(name=name))
+            continue
+
+        participant.is_active = True
+
+    db.commit()
 
 
 def parse_record_time(value: str | None) -> datetime:

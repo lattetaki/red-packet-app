@@ -22,6 +22,7 @@ import {
   createRecord,
   deleteRecord,
   getAmountPresets,
+  getAppUsers,
   getParticipants,
   getRecord,
   getRecords,
@@ -29,6 +30,7 @@ import {
   getSummaryStats,
   getTrendPoints,
   getUserStats,
+  type AppUser,
   type AmountPreset,
   type Participant,
   type RecordCreatePayload,
@@ -67,6 +69,7 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
 ]
 
 const currentRole: 'admin' | 'viewer' | 'contributor' = 'admin'
+const adminOnlyViews = new Set<ViewKey>(['review', 'users', 'import'])
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 
@@ -84,6 +87,15 @@ function formatMoney(amount: string) {
 
 function formatTime(value: string) {
   return value.replace('T', ' ').slice(0, 19)
+}
+
+function formatRole(role: AppUser['role']) {
+  const labels: Record<AppUser['role'], string> = {
+    admin: '管理员',
+    viewer: '只读用户',
+    contributor: '协助录入',
+  }
+  return labels[role]
 }
 
 function toNumber(value: string) {
@@ -206,6 +218,7 @@ function App() {
   const [userStats, setUserStats] = useState<UserStatsItem[]>([])
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
+  const [appUsers, setAppUsers] = useState<AppUser[]>([])
   const [amountPresets, setAmountPresets] = useState<AmountPreset[]>([])
   const [selectedTrendUserIds, setSelectedTrendUserIds] = useState<Set<number>>(new Set())
   const [entryTime, setEntryTime] = useState(currentDateTimeLocal())
@@ -236,7 +249,7 @@ function App() {
   const [apiError, setApiError] = useState<string | null>(null)
 
   async function loadDashboardData() {
-    const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData] = await Promise.all([
+    const [summaryData, recordData, pendingRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
       getRecords({ status: 'pending', limit: 100 }),
@@ -244,6 +257,7 @@ function App() {
       getTrendPoints(),
       getParticipants(),
       getAmountPresets(),
+      currentRole === 'admin' ? getAppUsers() : Promise.resolve([]),
     ])
 
     setSummary(summaryData)
@@ -253,6 +267,7 @@ function App() {
     setTrendPoints(trendData)
     setParticipants(participantData)
     setAmountPresets(presetData)
+    setAppUsers(appUserData)
     setSelectedTrendUserIds((current) => (current.size ? current : new Set(userStatsData.map((item) => item.participant_id))))
     setSenderId((current) => current || String(participantData[0]?.id ?? ''))
   }
@@ -1194,6 +1209,120 @@ function App() {
     )
   }
 
+  function renderUsers() {
+    if (currentRole !== 'admin') {
+      return renderPlaceholder('用户管理', '该页面仅管理员可见。')
+    }
+
+    return (
+      <div className="space-y-5">
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+            <div>
+              <h2 className="text-base font-semibold">网页访问账号</h2>
+              <p className="mt-1 text-sm text-slate-500">当前只初始化管理员与只读访问账号，密码不在页面中显示。</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={loadDashboardData}>
+              刷新
+            </Button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[680px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-medium text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">用户名</th>
+                  <th className="px-5 py-3">显示名称</th>
+                  <th className="px-5 py-3">角色</th>
+                  <th className="px-5 py-3">状态</th>
+                  <th className="px-5 py-3">说明</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {appUsers.map((user) => (
+                  <tr key={user.id}>
+                    <td className="px-5 py-3 font-medium">{user.username}</td>
+                    <td className="px-5 py-3 text-slate-600">{user.display_name}</td>
+                    <td className="px-5 py-3">
+                      <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{formatRole(user.role)}</span>
+                    </td>
+                    <td className="px-5 py-3">
+                      <span
+                        className={`rounded-md px-2 py-1 text-xs font-medium ${
+                          user.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                        }`}
+                      >
+                        {user.is_active ? '启用' : '停用'}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3 text-slate-500">{user.role === 'admin' ? '可管理记录、审核和系统数据' : '只能查看数据与明细'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">发包/抢包用户名单</h2>
+            <p className="mt-1 text-sm text-slate-500">这些用户来自现有数据，录入时作为发包人与抢包人的预设选择。</p>
+          </div>
+
+          <div className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-3">
+            {participants.map((participant) => (
+              <div key={participant.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
+                <div>
+                  <p className="font-medium">{participant.name}</p>
+                  <p className="mt-1 text-xs text-slate-500">参与者 ID：{participant.id}</p>
+                </div>
+                <span
+                  className={`rounded-md px-2 py-1 text-xs font-medium ${
+                    participant.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                  }`}
+                >
+                  {participant.is_active ? '可选择' : '已停用'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  function renderImport() {
+    if (currentRole !== 'admin') {
+      return renderPlaceholder('数据导入', '该页面仅管理员可见。')
+    }
+
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-4">
+          <h2 className="text-base font-semibold">数据导入</h2>
+          <p className="mt-1 text-sm text-slate-500">旧 JSON 数据已导入当前数据库，这里先保留后续扩展入口。</p>
+        </div>
+
+        <div className="grid gap-4 p-5 lg:grid-cols-3">
+          <div className="rounded-lg border border-slate-200 p-4">
+            <p className="text-sm font-medium text-slate-900">当前状态</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              后端已经具备 JSON 导入方法，并会跳过已存在的旧记录。当前前端暂不提供重复导入按钮。
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-200 p-4">
+            <p className="text-sm font-medium text-slate-900">后续扩展</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">可以增加文件选择、导入预览、重复记录检查和导入报告下载。</p>
+          </div>
+          <div className="rounded-lg border border-slate-200 p-4">
+            <p className="text-sm font-medium text-slate-900">权限边界</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">导入属于管理员操作，普通查看用户不会看到这个页面入口。</p>
+          </div>
+        </div>
+      </section>
+    )
+  }
+
   function renderPlaceholder(title: string, description: string) {
     return (
       <section className="rounded-lg border border-dashed border-slate-300 bg-white p-8">
@@ -1214,10 +1343,10 @@ function App() {
       return renderReviewQueue()
     }
     if (activeView === 'users') {
-      return renderPlaceholder('用户管理', '后续这里会管理预设用户名单和登录账号权限。')
+      return renderUsers()
     }
     if (activeView === 'import') {
-      return renderPlaceholder('数据导入', '旧 JSON 导入能力已经在后端具备，后续会加一个管理界面。')
+      return renderImport()
     }
     return renderDashboard()
   }
@@ -1239,7 +1368,7 @@ function App() {
 
             <nav className="mt-8 space-y-1">
               {navItems.map((item) => {
-                if (item.key === 'review' && currentRole !== 'admin') {
+                if (adminOnlyViews.has(item.key) && currentRole !== 'admin') {
                   return null
                 }
                 const Icon = item.icon

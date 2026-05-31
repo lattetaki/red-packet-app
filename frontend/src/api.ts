@@ -64,6 +64,14 @@ export type AmountPreset = {
   is_active: boolean
 }
 
+export type AppUser = {
+  id: number
+  username: string
+  display_name: string
+  role: 'admin' | 'viewer' | 'contributor'
+  is_active: boolean
+}
+
 export type RecordCreatePayload = {
   time?: string
   sender_id: number
@@ -172,6 +180,10 @@ export function getParticipants() {
 
 export function getAmountPresets() {
   return getJson<AmountPreset[]>('/amount-presets')
+}
+
+export function getAppUsers() {
+  return getJson<AppUser[]>('/admin/app-users')
 }
 
 export function createRecord(payload: RecordCreatePayload) {

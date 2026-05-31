@@ -8,11 +8,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import create_db_and_tables, get_db
-from models import AmountPreset, Participant, RecordStatus, RedPacketRecord
+from database import SessionLocal, create_db_and_tables, get_db
+from models import AmountPreset, AppUser, Participant, RecordStatus, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
+    AppUserRead,
     ImportReport,
     ImportRequest,
     ParticipantCreate,
@@ -30,6 +31,8 @@ from services import (
     build_trends,
     build_user_stats,
     create_record,
+    ensure_app_user_setup,
+    ensure_participant_setup,
     get_record_query,
     import_json_data,
     serialize_record_detail,
@@ -41,6 +44,9 @@ from services import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     create_db_and_tables()
+    with SessionLocal() as db:
+        ensure_participant_setup(db)
+        ensure_app_user_setup(db)
     yield
 
 
@@ -81,6 +87,11 @@ def create_participant(payload: ParticipantCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=409, detail="Participant already exists") from exc
     db.refresh(participant)
     return participant
+
+
+@app.get("/admin/app-users", response_model=list[AppUserRead])
+def list_app_users(db: Session = Depends(get_db)):
+    return db.scalars(select(AppUser).order_by(AppUser.role, AppUser.username)).all()
 
 
 @app.get("/amount-presets", response_model=list[AmountPresetRead])
