@@ -154,8 +154,12 @@ function toDateTimeLocal(value: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
+function makeClientId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 function newClaim(participantId = ''): EntryClaim {
-  return { id: crypto.randomUUID(), participantId, amount: '' }
+  return { id: makeClientId(), participantId, amount: '' }
 }
 
 function readSavedSession() {
@@ -881,7 +885,7 @@ function App() {
       setRecordDraftStatus(record.status as 'approved' | 'pending' | 'rejected')
       setRecordDraftClaims(
         record.claims.map((claim) => ({
-          id: crypto.randomUUID(),
+          id: makeClientId(),
           participantId: String(claim.participant_id),
           amount: claim.amount,
         })),
