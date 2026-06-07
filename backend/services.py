@@ -521,6 +521,21 @@ def build_record_stats(db: Session) -> dict:
     for participant in participants:
         received_rows = sorted(received_from[participant.id].items(), key=lambda item: (-item[1], participant_by_id[item[0]].name))
         sent_rows = sorted(sent_to[participant.id].items(), key=lambda item: (-item[1], participant_by_id[item[0]].name))
+        net_received_rows = []
+        net_sent_rows = []
+        for counterparty_id in participant_by_id:
+            if counterparty_id == participant.id:
+                continue
+            received_cents = received_from[participant.id][counterparty_id]
+            sent_cents = sent_to[participant.id][counterparty_id]
+            net_cents = received_cents - sent_cents
+            if net_cents > 0:
+                net_received_rows.append((counterparty_id, net_cents))
+            elif net_cents < 0:
+                net_sent_rows.append((counterparty_id, -net_cents))
+
+        net_received_rows.sort(key=lambda item: (-item[1], participant_by_id[item[0]].name))
+        net_sent_rows.sort(key=lambda item: (-item[1], participant_by_id[item[0]].name))
         max_claim = personal_max_claim.get(participant.id)
         min_claim = personal_min_claim.get(participant.id)
 
@@ -533,6 +548,8 @@ def build_record_stats(db: Session) -> dict:
                 "max_loss_streak": loss_best[participant.id],
                 "top_received_from": counterparty_stat(participant_by_id[received_rows[0][0]], received_rows[0][1]) if received_rows else None,
                 "top_sent_to": counterparty_stat(participant_by_id[sent_rows[0][0]], sent_rows[0][1]) if sent_rows else None,
+                "top_net_received_from": counterparty_stat(participant_by_id[net_received_rows[0][0]], net_received_rows[0][1]) if net_received_rows else None,
+                "top_net_sent_to": counterparty_stat(participant_by_id[net_sent_rows[0][0]], net_sent_rows[0][1]) if net_sent_rows else None,
             }
         )
 

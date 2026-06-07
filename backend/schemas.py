@@ -199,6 +199,8 @@ class PersonalRecordStats(BaseModel):
     max_loss_streak: int
     top_received_from: CounterpartyRecordStat | None
     top_sent_to: CounterpartyRecordStat | None
+    top_net_received_from: CounterpartyRecordStat | None
+    top_net_sent_to: CounterpartyRecordStat | None
 
 
 class RecordStatsResponse(BaseModel):

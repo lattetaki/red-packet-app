@@ -1184,6 +1184,8 @@ function App() {
       { label: '最多连败', value: `${item.max_loss_streak} 场`, detail: '连续发包的最长场次' },
       { label: '吃米最多', value: item.top_received_from ? formatMoney(item.top_received_from.amount) : '-', detail: renderCounterpartyLine(item.top_received_from, '来自') },
       { label: '送米最多', value: item.top_sent_to ? formatMoney(item.top_sent_to.amount) : '-', detail: renderCounterpartyLine(item.top_sent_to, '送给') },
+      { label: '净吃米最多', value: item.top_net_received_from ? formatMoney(item.top_net_received_from.amount) : '-', detail: renderCounterpartyLine(item.top_net_received_from, '净来自') },
+      { label: '净送米最多', value: item.top_net_sent_to ? formatMoney(item.top_net_sent_to.amount) : '-', detail: renderCounterpartyLine(item.top_net_sent_to, '净送给') },
     ]
 
     return (
@@ -1195,7 +1197,7 @@ function App() {
             <p className="mt-1 text-sm text-slate-500">个人记录峰值与主要往来对象</p>
           </div>
         </div>
-        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {cards.map((card) => (
             <div key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
               <p className="text-sm text-slate-500">{card.label}</p>

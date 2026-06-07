@@ -141,6 +141,8 @@ export type PersonalRecordStats = {
   max_loss_streak: number
   top_received_from: CounterpartyRecordStat | null
   top_sent_to: CounterpartyRecordStat | null
+  top_net_received_from: CounterpartyRecordStat | null
+  top_net_sent_to: CounterpartyRecordStat | null
 }
 
 export type RecordStatsResponse = {
