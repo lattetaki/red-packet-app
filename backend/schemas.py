@@ -93,6 +93,8 @@ class RecordListItem(BaseModel):
     note: str
     status: str
     created_by_user_id: int | None = None
+    deleted_at: datetime | None = None
+    deleted_by_user_id: int | None = None
 
 
 class RecordDetail(RecordListItem):
@@ -102,6 +104,12 @@ class RecordDetail(RecordListItem):
 class RecordListResponse(BaseModel):
     items: list[RecordListItem]
     total: int
+
+
+class BackupInfo(BaseModel):
+    filename: str
+    size_bytes: int
+    created_at: datetime
 
 
 class SummaryStats(BaseModel):

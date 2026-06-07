@@ -1,15 +1,21 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
+import gzip
+import logging
+import os
 from pathlib import Path
+import shutil
+import sqlite3
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, require_admin
-from database import SessionLocal, create_db_and_tables, get_db
+from database import SessionLocal, create_db_and_tables, database_path, get_db
 from models import AmountPreset, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
@@ -17,6 +23,7 @@ from schemas import (
     AppUserCreate,
     AppUserRead,
     AppUserUpdate,
+    BackupInfo,
     ImportReport,
     ImportRequest,
     LoginRequest,
@@ -38,8 +45,11 @@ from services import (
     build_trends,
     build_user_stats,
     create_record,
+    active_records_query,
+    deleted_records_query,
     ensure_app_user_setup,
     ensure_participant_setup,
+    ensure_record_soft_delete_columns,
     get_record_query,
     import_json_data,
     serialize_record_detail,
@@ -49,12 +59,57 @@ from services import (
 
 
 VALID_APP_ROLES = {"admin", "viewer", "contributor"}
+logger = logging.getLogger("red_packet")
+logging.basicConfig(level=logging.INFO)
+default_backup_dir = database_path.parent / "backups" if os.name == "nt" else Path("/home/ubuntu/red-packet-backups")
+backup_dir = Path(os.getenv("RED_PACKET_BACKUP_DIR", default_backup_dir)).expanduser()
+
+
+def get_backup_file(filename: str) -> Path:
+    if "/" in filename or "\\" in filename or not filename.endswith(".db.gz"):
+        raise HTTPException(status_code=404, detail="Backup not found")
+    path = backup_dir / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return path
+
+
+def serialize_backup(path: Path) -> dict:
+    stat = path.stat()
+    return {
+        "filename": path.name,
+        "size_bytes": stat.st_size,
+        "created_at": datetime.fromtimestamp(stat.st_mtime),
+    }
+
+
+def create_database_backup() -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    temp_path = backup_dir / f"hongbao-{timestamp}.db"
+    backup_path = backup_dir / f"hongbao-{timestamp}.db.gz"
+
+    source = sqlite3.connect(str(database_path))
+    try:
+        target = sqlite3.connect(str(temp_path))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+    with temp_path.open("rb") as raw, gzip.open(backup_path, "wb") as compressed:
+        shutil.copyfileobj(raw, compressed)
+    temp_path.unlink(missing_ok=True)
+    return backup_path
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     create_db_and_tables()
     with SessionLocal() as db:
+        ensure_record_soft_delete_columns(db)
         ensure_participant_setup(db)
         ensure_app_user_setup(db)
     yield
@@ -85,7 +140,9 @@ def health():
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_app_user(db, payload.username, payload.password)
     if user is None:
+        logger.warning("login failed username=%s", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    logger.info("login success user_id=%s username=%s role=%s", user.id, user.username, user.role)
     return {"user": user, "token": create_access_token(user)}
 
 
@@ -104,6 +161,7 @@ def create_participant(payload: ParticipantCreate, _: AppUser = Depends(require_
         db.rollback()
         raise HTTPException(status_code=409, detail="Participant already exists") from exc
     db.refresh(participant)
+    logger.info("participant created id=%s name=%s", participant.id, participant.name)
     return participant
 
 
@@ -131,6 +189,7 @@ def create_app_user(payload: AppUserCreate, _: AppUser = Depends(require_admin),
         db.rollback()
         raise HTTPException(status_code=409, detail="Username already exists") from exc
     db.refresh(user)
+    logger.info("app user created id=%s username=%s role=%s", user.id, user.username, user.role)
     return user
 
 
@@ -160,6 +219,7 @@ def update_app_user(user_id: int, payload: AppUserUpdate, current_user: AppUser 
 
     db.commit()
     db.refresh(user)
+    logger.info("app user updated id=%s username=%s role=%s active=%s", user.id, user.username, user.role, user.is_active)
     return user
 
 
@@ -185,7 +245,7 @@ def list_records(
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = get_record_query()
+    query = active_records_query()
     if current_user.role != "admin":
         query = query.where(RedPacketRecord.status == RecordStatus.approved.value)
     elif status:
@@ -215,7 +275,7 @@ def list_my_records(
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = get_record_query().where(RedPacketRecord.created_by_user_id == current_user.id)
+    query = active_records_query().where(RedPacketRecord.created_by_user_id == current_user.id)
     total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     records = db.scalars(query.offset(offset).limit(limit)).all()
     return {"items": [serialize_record_list_item(record) for record in records], "total": total}
@@ -231,12 +291,13 @@ def add_record(payload: RecordCreate, current_user: AppUser = Depends(get_curren
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record.id)).one()
+    logger.info("record created id=%s user_id=%s status=%s", record.id, current_user.id, record.status)
     return serialize_record_detail(record)
 
 
 @app.get("/records/{record_id}", response_model=RecordDetail)
 def get_record(record_id: int, current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    record = db.scalars(active_records_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     if current_user.role != "admin" and record.status != RecordStatus.approved.value and record.created_by_user_id != current_user.id:
@@ -246,7 +307,7 @@ def get_record(record_id: int, current_user: AppUser = Depends(get_current_user)
 
 @app.put("/records/{record_id}", response_model=RecordDetail)
 def put_record(record_id: int, payload: RecordUpdate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
-    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    record = db.scalars(active_records_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     try:
@@ -255,22 +316,71 @@ def put_record(record_id: int, payload: RecordUpdate, _: AppUser = Depends(requi
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     updated = db.scalars(get_record_query().where(RedPacketRecord.id == updated.id)).one()
+    logger.info("record updated id=%s", updated.id)
     return serialize_record_detail(updated)
 
 
 @app.delete("/records/{record_id}")
-def delete_record(record_id: int, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+def delete_record(record_id: int, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     record = db.get(RedPacketRecord, record_id)
+    if record is None or record.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    record.deleted_at = datetime.utcnow()
+    record.deleted_by_user_id = current_user.id
+    db.commit()
+    logger.info("record soft deleted id=%s user_id=%s", record_id, current_user.id)
+    return {"deleted": True}
+
+
+@app.get("/admin/deleted-records", response_model=RecordListResponse)
+def list_deleted_records(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500),
+    _: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    query = deleted_records_query()
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    records = db.scalars(query.offset(offset).limit(limit)).all()
+    return {"items": [serialize_record_list_item(record) for record in records], "total": total}
+
+
+@app.post("/admin/deleted-records/{record_id}/restore", response_model=RecordDetail)
+def restore_deleted_record(record_id: int, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    record = db.scalars(deleted_records_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
-    db.delete(record)
+    record.deleted_at = None
+    record.deleted_by_user_id = None
     db.commit()
-    return {"deleted": True}
+    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
+    logger.info("record restored id=%s user_id=%s", record_id, current_user.id)
+    return serialize_record_detail(record)
+
+
+@app.get("/admin/backups", response_model=list[BackupInfo])
+def list_backups(_: AppUser = Depends(require_admin)):
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backups = sorted(backup_dir.glob("hongbao-*.db.gz"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return [serialize_backup(path) for path in backups]
+
+
+@app.post("/admin/backups", response_model=BackupInfo)
+def create_backup(current_user: AppUser = Depends(require_admin)):
+    path = create_database_backup()
+    logger.info("backup created filename=%s user_id=%s", path.name, current_user.id)
+    return serialize_backup(path)
+
+
+@app.get("/admin/backups/{filename}")
+def download_backup(filename: str, _: AppUser = Depends(require_admin)):
+    path = get_backup_file(filename)
+    return FileResponse(path, media_type="application/gzip", filename=path.name)
 
 
 @app.post("/admin/review-records/{record_id}/approve", response_model=RecordDetail)
 def approve_record(record_id: int, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
-    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    record = db.scalars(active_records_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     record.status = RecordStatus.approved.value
@@ -278,17 +388,19 @@ def approve_record(record_id: int, current_user: AppUser = Depends(require_admin
     record.approved_at = datetime.utcnow()
     db.commit()
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
+    logger.info("record approved id=%s user_id=%s", record_id, current_user.id)
     return serialize_record_detail(record)
 
 
 @app.post("/admin/review-records/{record_id}/reject", response_model=RecordDetail)
 def reject_record(record_id: int, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
-    record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).first()
+    record = db.scalars(active_records_query().where(RedPacketRecord.id == record_id)).first()
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     record.status = RecordStatus.rejected.value
     db.commit()
     record = db.scalars(get_record_query().where(RedPacketRecord.id == record_id)).one()
+    logger.info("record rejected id=%s", record_id)
     return serialize_record_detail(record)
 
 
@@ -313,6 +425,8 @@ def import_json(payload: ImportRequest, _: AppUser = Depends(require_admin), db:
     if not source_path.is_absolute():
         source_path = (Path(__file__).parent / source_path).resolve()
     try:
-        return import_json_data(db, str(source_path), reset=payload.reset)
+        report = import_json_data(db, str(source_path), reset=payload.reset)
+        logger.info("json imported path=%s reset=%s records=%s skipped=%s", source_path, payload.reset, report.records_imported, report.records_skipped)
+        return report
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"JSON file not found: {source_path}") from exc

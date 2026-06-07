@@ -5,12 +5,14 @@ import {
   Check,
   CircleDollarSign,
   Database,
+  Download,
   Gift,
   Home,
   LockKeyhole,
   LogOut,
   ListChecks,
   Plus,
+  RotateCcw,
   Search,
   Users,
 } from 'lucide-react'
@@ -20,12 +22,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   approveRecord,
+  createBackup,
   createAppUser,
   createParticipant,
   createRecord,
   deleteRecord,
+  downloadBackup,
   getAmountPresets,
   getAppUsers,
+  getBackups,
+  getDeletedRecords,
   getParticipants,
   getRecord,
   getRecords,
@@ -40,6 +46,7 @@ import {
   type AppUserCreatePayload,
   type AppUserUpdatePayload,
   type AmountPreset,
+  type BackupInfo,
   type Participant,
   type RecordCreatePayload,
   type RecordDetail,
@@ -48,12 +55,13 @@ import {
   type TrendPoint,
   type UserStatsItem,
   rejectRecord,
+  restoreDeletedRecord,
   updateAppUser,
   updateRecord,
 } from './api'
 import './App.css'
 
-type ViewKey = 'dashboard' | 'entry' | 'records' | 'review' | 'users' | 'import'
+type ViewKey = 'dashboard' | 'entry' | 'records' | 'review' | 'deleted' | 'users' | 'backup' | 'import'
 
 type SummaryItem = {
   label: string
@@ -85,13 +93,16 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '录入', icon: Plus, key: 'entry' },
   { label: '记录列表', icon: ListChecks, key: 'records' },
   { label: '审核队列', icon: LockKeyhole, key: 'review' },
+  { label: '已删除记录', icon: RotateCcw, key: 'deleted' },
   { label: '用户管理', icon: Users, key: 'users' },
+  { label: '备份管理', icon: Download, key: 'backup' },
   { label: '数据导入', icon: Database, key: 'import' },
 ]
 
 const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records'])
 const savedUserKey = 'red-packet-current-user'
 const senderDefaultsKey = 'red-packet-sender-default-amounts'
+const appEnvironmentLabel = import.meta.env.VITE_APP_ENV_LABEL ?? ''
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 
@@ -109,6 +120,12 @@ function formatMoney(amount: string) {
 
 function formatTime(value: string) {
   return value.replace('T', ' ').slice(0, 19)
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 
 function formatRole(role: AppUser['role']) {
@@ -291,6 +308,16 @@ function App() {
   const [pendingRecords, setPendingRecords] = useState<RecordListItem[]>([])
   const [myRecords, setMyRecords] = useState<RecordListItem[]>([])
   const [myRecordTotal, setMyRecordTotal] = useState(0)
+  const [deletedRecords, setDeletedRecords] = useState<RecordListItem[]>([])
+  const [deletedRecordTotal, setDeletedRecordTotal] = useState(0)
+  const [deletedRecordMessage, setDeletedRecordMessage] = useState<string | null>(null)
+  const [deletedRecordError, setDeletedRecordError] = useState<string | null>(null)
+  const [restoringRecordId, setRestoringRecordId] = useState<number | null>(null)
+  const [backups, setBackups] = useState<BackupInfo[]>([])
+  const [backupMessage, setBackupMessage] = useState<string | null>(null)
+  const [backupError, setBackupError] = useState<string | null>(null)
+  const [creatingBackup, setCreatingBackup] = useState(false)
+  const [downloadingBackup, setDownloadingBackup] = useState<string | null>(null)
   const [userStats, setUserStats] = useState<UserStatsItem[]>([])
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
@@ -354,10 +381,24 @@ function App() {
   const isAdmin = currentRole === 'admin'
 
   const loadDashboardData = useCallback(async () => {
-    const [summaryData, recordData, pendingRecordData, myRecordData, userStatsData, trendData, participantData, presetData, appUserData] = await Promise.all([
+    const [
+      summaryData,
+      recordData,
+      pendingRecordData,
+      deletedRecordData,
+      backupData,
+      myRecordData,
+      userStatsData,
+      trendData,
+      participantData,
+      presetData,
+      appUserData,
+    ] = await Promise.all([
       getSummaryStats(),
       getRecentRecords(30),
       isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve({ items: [], total: 0 }),
+      isAdmin ? getDeletedRecords({ limit: 50 }) : Promise.resolve({ items: [], total: 0 }),
+      isAdmin ? getBackups() : Promise.resolve([]),
       getMyRecords({ limit: 10 }),
       getUserStats(),
       getTrendPoints(),
@@ -370,6 +411,9 @@ function App() {
     setRecords(recordData.items)
     setRecordTotal(recordData.total)
     setPendingRecords(pendingRecordData.items)
+    setDeletedRecords(deletedRecordData.items)
+    setDeletedRecordTotal(deletedRecordData.total)
+    setBackups(backupData)
     setMyRecords(myRecordData.items)
     setMyRecordTotal(myRecordData.total)
     setUserStats(userStatsData)
@@ -411,6 +455,53 @@ function App() {
   async function loadPendingRecords() {
     const data = await getRecords({ status: 'pending', limit: 100 })
     setPendingRecords(data.items)
+  }
+
+  async function loadDeletedRecords() {
+    const data = await getDeletedRecords({ limit: 50 })
+    setDeletedRecords(data.items)
+    setDeletedRecordTotal(data.total)
+  }
+
+  async function loadBackups() {
+    const data = await getBackups()
+    setBackups(data)
+  }
+
+  async function handleCreateBackup() {
+    setBackupMessage(null)
+    setBackupError(null)
+    try {
+      setCreatingBackup(true)
+      const backup = await createBackup()
+      setBackupMessage(`备份已创建：${backup.filename}`)
+      await loadBackups()
+    } catch {
+      setBackupError('创建备份失败，请稍后重试或在服务器上执行备份脚本。')
+    } finally {
+      setCreatingBackup(false)
+    }
+  }
+
+  async function handleDownloadBackup(filename: string) {
+    setBackupMessage(null)
+    setBackupError(null)
+    try {
+      setDownloadingBackup(filename)
+      const blob = await downloadBackup(filename)
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch {
+      setBackupError('下载备份失败，请确认登录状态和后端连接。')
+    } finally {
+      setDownloadingBackup(null)
+    }
   }
 
   async function loadMyRecords() {
@@ -994,6 +1085,22 @@ function App() {
       setReviewError('审核操作失败。')
     } finally {
       setReviewingRecordId(null)
+    }
+  }
+
+  async function restoreRecord(recordId: number) {
+    setDeletedRecordMessage(null)
+    setDeletedRecordError(null)
+    try {
+      setRestoringRecordId(recordId)
+      await restoreDeletedRecord(recordId)
+      setDeletedRecordMessage('记录已恢复。')
+      await loadDashboardData()
+      await loadDeletedRecords()
+    } catch {
+      setDeletedRecordError('恢复失败。')
+    } finally {
+      setRestoringRecordId(null)
     }
   }
 
@@ -1802,6 +1909,143 @@ function App() {
     )
   }
 
+  function renderDeletedRecords() {
+    if (currentRole !== 'admin') {
+      return renderPlaceholder('已删除记录', '该页面仅管理员可见。')
+    }
+
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold">已删除记录</h2>
+            <p className="mt-1 text-sm text-slate-500">这里显示被管理员删除的记录，可恢复到记录列表。</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={loadDeletedRecords}>
+            刷新
+          </Button>
+        </div>
+
+        <div className="p-5">
+          {deletedRecordError ? <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{deletedRecordError}</div> : null}
+          {deletedRecordMessage ? (
+            <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{deletedRecordMessage}</div>
+          ) : null}
+
+          {deletedRecords.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
+              当前没有已删除记录。
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[860px] text-left text-sm">
+                <thead className="bg-slate-50 text-xs font-medium text-slate-500">
+                  <tr>
+                    <th className="px-5 py-3">时间</th>
+                    <th className="px-5 py-3">发包人</th>
+                    <th className="px-5 py-3">红包总额</th>
+                    <th className="px-5 py-3">明细合计</th>
+                    <th className="px-5 py-3">删除时间</th>
+                    <th className="px-5 py-3">备注</th>
+                    <th className="px-5 py-3">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {deletedRecords.map((record) => (
+                    <tr key={record.id}>
+                      <td className="whitespace-nowrap px-5 py-3 text-slate-600">{formatTime(record.time)}</td>
+                      <td className="px-5 py-3 font-medium">{record.sender_name}</td>
+                      <td className="px-5 py-3">{formatMoney(record.total_amount)}</td>
+                      <td className="px-5 py-3">{formatMoney(record.claimed_amount)}</td>
+                      <td className="whitespace-nowrap px-5 py-3 text-slate-500">{record.deleted_at ? formatTime(record.deleted_at) : '-'}</td>
+                      <td className="px-5 py-3 text-slate-500">{record.note || '-'}</td>
+                      <td className="px-5 py-3">
+                        <Button variant="outline" size="sm" onClick={() => restoreRecord(record.id)} disabled={restoringRecordId === record.id}>
+                          {restoringRecordId === record.id ? '恢复中' : '恢复'}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        <div className="border-t border-slate-100 px-5 py-3 text-sm text-slate-500">共 {deletedRecordTotal} 条</div>
+      </section>
+    )
+  }
+
+  function renderBackups() {
+    if (currentRole !== 'admin') {
+      return renderPlaceholder('备份管理', '该页面仅管理员可见。')
+    }
+
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold">备份管理</h2>
+            <p className="mt-1 text-sm text-slate-500">管理员可以创建和下载数据库备份；恢复请在服务器上执行恢复脚本，避免误覆盖线上数据。</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={loadBackups}>
+              刷新
+            </Button>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" size="sm" onClick={handleCreateBackup} disabled={creatingBackup}>
+              {creatingBackup ? '创建中' : '创建备份'}
+            </Button>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="mb-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
+            恢复命令：<span className="font-mono">bash scripts/restore_db.sh /home/ubuntu/red-packet-backups/文件名.db.gz</span>
+          </div>
+
+          {backupError ? <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{backupError}</div> : null}
+          {backupMessage ? <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{backupMessage}</div> : null}
+
+          {backups.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">当前还没有备份。</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-sm">
+                <thead className="bg-slate-50 text-xs font-medium text-slate-500">
+                  <tr>
+                    <th className="px-5 py-3">文件名</th>
+                    <th className="px-5 py-3">大小</th>
+                    <th className="px-5 py-3">创建时间</th>
+                    <th className="px-5 py-3">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {backups.map((backup) => (
+                    <tr key={backup.filename}>
+                      <td className="px-5 py-3 font-mono text-xs text-slate-700">{backup.filename}</td>
+                      <td className="px-5 py-3 text-slate-600">{formatBytes(backup.size_bytes)}</td>
+                      <td className="whitespace-nowrap px-5 py-3 text-slate-500">{formatTime(backup.created_at)}</td>
+                      <td className="px-5 py-3">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleDownloadBackup(backup.filename)}
+                          disabled={downloadingBackup === backup.filename}
+                        >
+                          {downloadingBackup === backup.filename ? '下载中' : '下载'}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    )
+  }
+
   function renderUsers() {
     if (currentRole !== 'admin') {
       return renderPlaceholder('用户管理', '该页面仅管理员可见。')
@@ -2065,8 +2309,14 @@ function App() {
     if (activeView === 'review') {
       return renderReviewQueue()
     }
+    if (activeView === 'deleted') {
+      return renderDeletedRecords()
+    }
     if (activeView === 'users') {
       return renderUsers()
+    }
+    if (activeView === 'backup') {
+      return renderBackups()
     }
     if (activeView === 'import') {
       return renderImport()
@@ -2134,7 +2384,8 @@ function App() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-sm text-slate-500">
                   <CalendarDays className="size-4" />
-                  本地原型 · {loading ? '正在读取后端' : '已连接后端数据'}
+                  {appEnvironmentLabel ? `${appEnvironmentLabel} · ` : ''}
+                  {loading ? '正在读取数据' : '已连接数据'}
                 </div>
                 <h1 className="mt-1 truncate text-2xl font-semibold tracking-normal">
                   {activeView === 'dashboard' ? '红包统计首页' : navItems.find((item) => item.key === activeView)?.label}

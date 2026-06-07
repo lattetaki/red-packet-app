@@ -64,6 +64,8 @@ class RedPacketRecord(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True)
     approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

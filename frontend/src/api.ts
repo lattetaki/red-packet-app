@@ -21,6 +21,8 @@ export type RecordListItem = {
   note: string
   status: string
   created_by_user_id: number | null
+  deleted_at: string | null
+  deleted_by_user_id: number | null
 }
 
 export type RecordListResponse = {
@@ -82,6 +84,12 @@ export type AppUser = {
 export type LoginResponse = {
   user: AppUser
   token: string
+}
+
+export type BackupInfo = {
+  filename: string
+  size_bytes: number
+  created_at: string
 }
 
 export type AppUserCreatePayload = {
@@ -265,6 +273,35 @@ export function updateRecord(recordId: number, payload: RecordCreatePayload) {
 
 export function deleteRecord(recordId: number) {
   return deleteJson<{ deleted: boolean }>(`/records/${recordId}`)
+}
+
+export function getDeletedRecords(query: Pick<RecordQuery, 'offset' | 'limit'> = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(query.limit ?? 50))
+  params.set('offset', String(query.offset ?? 0))
+  return getJson<RecordListResponse>(`/admin/deleted-records?${params.toString()}`)
+}
+
+export function restoreDeletedRecord(recordId: number) {
+  return postJson<RecordDetail, Record<string, never>>(`/admin/deleted-records/${recordId}/restore`, {})
+}
+
+export function getBackups() {
+  return getJson<BackupInfo[]>('/admin/backups')
+}
+
+export function createBackup() {
+  return postJson<BackupInfo, Record<string, never>>('/admin/backups', {})
+}
+
+export async function downloadBackup(filename: string) {
+  const response = await fetch(`${API_BASE_URL}/admin/backups/${encodeURIComponent(filename)}`, {
+    headers: buildHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+  return response.blob()
 }
 
 export function approveRecord(recordId: number) {

@@ -81,6 +81,19 @@ def ensure_participant_setup(db: Session) -> None:
     db.commit()
 
 
+def ensure_record_soft_delete_columns(db: Session) -> None:
+    columns = {row[1] for row in db.execute(text("PRAGMA table_info(red_packet_records)"))}
+    changed = False
+    if "deleted_by_user_id" not in columns:
+        db.execute(text("ALTER TABLE red_packet_records ADD COLUMN deleted_by_user_id INTEGER"))
+        changed = True
+    if "deleted_at" not in columns:
+        db.execute(text("ALTER TABLE red_packet_records ADD COLUMN deleted_at DATETIME"))
+        changed = True
+    if changed:
+        db.commit()
+
+
 def authenticate_app_user(db: Session, username: str, password: str) -> AppUser | None:
     user = db.scalar(select(AppUser).where(AppUser.username == username.strip()))
     if user is None or not user.is_active:
@@ -155,6 +168,8 @@ def serialize_record_list_item(record: RedPacketRecord) -> dict:
         "note": record.note,
         "status": record.status,
         "created_by_user_id": record.created_by_user_id,
+        "deleted_at": record.deleted_at,
+        "deleted_by_user_id": record.deleted_by_user_id,
     }
 
 
@@ -267,15 +282,25 @@ def get_record_query():
     )
 
 
+def active_records_query():
+    return get_record_query().where(RedPacketRecord.deleted_at.is_(None))
+
+
+def deleted_records_query():
+    return get_record_query().where(RedPacketRecord.deleted_at.is_not(None))
+
+
 def build_summary(db: Session) -> dict:
     approved_records = db.scalars(
         select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
         .options(selectinload(RedPacketRecord.claims))
     ).all()
 
     pending_count = db.scalar(
-        select(func.count()).select_from(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.pending.value)
+        select(func.count())
+        .select_from(RedPacketRecord)
+        .where(RedPacketRecord.status == RecordStatus.pending.value, RedPacketRecord.deleted_at.is_(None))
     )
     participant_count = db.scalar(select(func.count()).select_from(Participant).where(Participant.is_active.is_(True)))
 
@@ -307,7 +332,7 @@ def build_user_stats(db: Session) -> list[dict]:
 
     records = db.scalars(
         select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
         .options(selectinload(RedPacketRecord.sender), selectinload(RedPacketRecord.claims))
     ).all()
 
@@ -365,7 +390,7 @@ def build_user_stats(db: Session) -> list[dict]:
 def build_trends(db: Session) -> list[dict]:
     records = db.scalars(
         select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value)
+        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
         .options(
             selectinload(RedPacketRecord.sender),
             selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),
