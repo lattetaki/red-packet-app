@@ -139,6 +139,15 @@ class BackupInfo(BaseModel):
     created_at: datetime
 
 
+class PinnedNoticeRead(BaseModel):
+    content: str
+    updated_at: datetime | None = None
+
+
+class PinnedNoticeUpdate(BaseModel):
+    content: str = Field(default="", max_length=500)
+
+
 class SummaryStats(BaseModel):
     record_count: int
     participant_count: int

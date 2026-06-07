@@ -38,6 +38,7 @@ import {
   getBackups,
   getDeletedRecords,
   getParticipants,
+  getPinnedNotice,
   getRecord,
   getRecords,
   getRecordStats,
@@ -59,6 +60,7 @@ import {
   type CounterpartyRecordStat,
   type Participant,
   type PersonalRecordStats,
+  type PinnedNotice,
   type RecordCreatePayload,
   type RecordDetail,
   type RecordListItem,
@@ -73,6 +75,7 @@ import {
   updateAnnouncement,
   updateAppUser,
   updateParticipantAvatar,
+  updatePinnedNotice,
   updateRecord,
 } from './api'
 import './App.css'
@@ -147,6 +150,11 @@ const fallbackSummary: SummaryStats = {
   total_sent_amount: '0',
   total_claimed_amount: '0',
   pending_count: 0,
+}
+
+const fallbackPinnedNotice: PinnedNotice = {
+  content: '',
+  updated_at: null,
 }
 
 const fallbackRecordStats: RecordStatsResponse = {
@@ -381,6 +389,11 @@ function App() {
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => readSavedSession())
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
+  const [pinnedNotice, setPinnedNotice] = useState<PinnedNotice>(fallbackPinnedNotice)
+  const [pinnedNoticeDraft, setPinnedNoticeDraft] = useState('')
+  const [pinnedNoticeMessage, setPinnedNoticeMessage] = useState<string | null>(null)
+  const [pinnedNoticeError, setPinnedNoticeError] = useState<string | null>(null)
+  const [savingPinnedNotice, setSavingPinnedNotice] = useState(false)
   const [records, setRecords] = useState<RecordListItem[]>([])
   const [recordTotal, setRecordTotal] = useState(0)
   const [recordLimit, setRecordLimit] = useState(30)
@@ -473,6 +486,7 @@ function App() {
   const loadDashboardData = useCallback(async () => {
     const [
       summaryData,
+      pinnedNoticeData,
       recordData,
       pendingRecordData,
       deletedRecordData,
@@ -487,6 +501,7 @@ function App() {
       appUserData,
     ] = await Promise.all([
       getSummaryStats(),
+      getPinnedNotice(),
       getRecentRecords(30),
       isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve({ items: [], total: 0 }),
       isAdmin ? getDeletedRecords({ limit: 50 }) : Promise.resolve({ items: [], total: 0 }),
@@ -502,6 +517,8 @@ function App() {
     ])
 
     setSummary(summaryData)
+    setPinnedNotice(pinnedNoticeData)
+    setPinnedNoticeDraft((current) => (current ? current : pinnedNoticeData.content))
     setRecords(recordData.items)
     setRecordTotal(recordData.total)
     setPendingRecords(pendingRecordData.items)
@@ -908,6 +925,23 @@ function App() {
       setAnnouncementError('保存更新公告失败，请稍后重试。')
     } finally {
       setSavingAnnouncement(false)
+    }
+  }
+
+  async function savePinnedNotice() {
+    setPinnedNoticeMessage(null)
+    setPinnedNoticeError(null)
+
+    try {
+      setSavingPinnedNotice(true)
+      const saved = await updatePinnedNotice(pinnedNoticeDraft)
+      setPinnedNotice(saved)
+      setPinnedNoticeDraft(saved.content)
+      setPinnedNoticeMessage(saved.content ? '置顶公告已更新。' : '置顶公告已清空。')
+    } catch {
+      setPinnedNoticeError('保存置顶公告失败，请稍后重试。')
+    } finally {
+      setSavingPinnedNotice(false)
     }
   }
 
@@ -1703,9 +1737,49 @@ function App() {
     )
   }
 
+  function renderPinnedNotice() {
+    if (!pinnedNotice.content && !isAdmin) return null
+
+    return (
+      <section className="mb-5 rounded-lg border border-red-100 bg-red-50 px-5 py-4 shadow-sm">
+        {pinnedNotice.content ? (
+          <div className="flex items-start gap-3">
+            <BookOpen className="mt-0.5 size-4 shrink-0 text-red-600" />
+            <p className="text-sm font-medium leading-6 text-red-800">{pinnedNotice.content}</p>
+          </div>
+        ) : (
+          <div className="flex items-start gap-3">
+            <BookOpen className="mt-0.5 size-4 shrink-0 text-slate-400" />
+            <p className="text-sm leading-6 text-slate-500">当前没有置顶公告。</p>
+          </div>
+        )}
+
+        {isAdmin ? (
+          <div className="mt-4 border-t border-red-100 pt-4">
+            <div className="flex flex-col gap-2 lg:flex-row">
+              <input
+                className="h-10 min-w-0 flex-1 rounded-lg border border-red-100 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={pinnedNoticeDraft}
+                maxLength={500}
+                onChange={(event) => setPinnedNoticeDraft(event.target.value)}
+                placeholder="输入一行首页置顶公告，留空保存则隐藏"
+              />
+              <Button className="bg-red-600 text-white hover:bg-red-700" onClick={savePinnedNotice} disabled={savingPinnedNotice}>
+                {savingPinnedNotice ? '保存中' : '保存公告'}
+              </Button>
+            </div>
+            {pinnedNoticeError ? <div className="mt-2 text-sm text-red-700">{pinnedNoticeError}</div> : null}
+            {pinnedNoticeMessage ? <div className="mt-2 text-sm text-emerald-700">{pinnedNoticeMessage}</div> : null}
+          </div>
+        ) : null}
+      </section>
+    )
+  }
+
   function renderDashboard() {
     return (
       <>
+        {renderPinnedNotice()}
         {renderSummaryCards()}
 
         <section className="mt-5 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">

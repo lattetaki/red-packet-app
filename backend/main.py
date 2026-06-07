@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, require_admin
 from database import SessionLocal, create_db_and_tables, database_path, get_db
-from models import AmountPreset, Announcement, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
+from models import AmountPreset, Announcement, AppRole, AppSetting, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
@@ -34,6 +34,8 @@ from schemas import (
     ParticipantAvatarUpdate,
     ParticipantCreate,
     ParticipantRead,
+    PinnedNoticeRead,
+    PinnedNoticeUpdate,
     RecordCreate,
     RecordDetail,
     RecordListResponse,
@@ -65,6 +67,7 @@ from services import (
 
 
 VALID_APP_ROLES = {"admin", "viewer", "contributor"}
+PINNED_NOTICE_KEY = "pinned_notice"
 logger = logging.getLogger("red_packet")
 logging.basicConfig(level=logging.INFO)
 default_backup_dir = database_path.parent / "backups" if os.name == "nt" else Path("/home/ubuntu/red-packet-backups")
@@ -263,6 +266,30 @@ def list_amount_presets(_: AppUser = Depends(get_current_user), db: Session = De
 @app.get("/announcements", response_model=list[AnnouncementRead])
 def list_announcements(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.scalars(select(Announcement).order_by(Announcement.created_at.desc(), Announcement.id.desc())).all()
+
+
+@app.get("/pinned-notice", response_model=PinnedNoticeRead)
+def get_pinned_notice(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    setting = db.get(AppSetting, PINNED_NOTICE_KEY)
+    return {
+        "content": setting.value if setting else "",
+        "updated_at": setting.updated_at if setting else None,
+    }
+
+
+@app.put("/admin/pinned-notice", response_model=PinnedNoticeRead)
+def update_pinned_notice(payload: PinnedNoticeUpdate, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    setting = db.get(AppSetting, PINNED_NOTICE_KEY)
+    if setting is None:
+        setting = AppSetting(key=PINNED_NOTICE_KEY, value="")
+        db.add(setting)
+
+    setting.value = payload.content.strip()
+    setting.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(setting)
+    logger.info("pinned notice updated user_id=%s has_content=%s", current_user.id, bool(setting.value))
+    return {"content": setting.value, "updated_at": setting.updated_at}
 
 
 @app.post("/admin/announcements", response_model=AnnouncementRead)

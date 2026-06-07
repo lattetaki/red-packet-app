@@ -109,6 +109,11 @@ export type AnnouncementPayload = {
   content: string
 }
 
+export type PinnedNotice = {
+  content: string
+  updated_at: string | null
+}
+
 export type StatsParticipant = {
   id: number
   name: string
@@ -322,6 +327,14 @@ export function getAmountPresets() {
 
 export function getAnnouncements() {
   return getJson<Announcement[]>('/announcements')
+}
+
+export function getPinnedNotice() {
+  return getJson<PinnedNotice>('/pinned-notice')
+}
+
+export function updatePinnedNotice(content: string) {
+  return putJson<PinnedNotice, { content: string }>('/admin/pinned-notice', { content })
 }
 
 export function createAnnouncement(payload: AnnouncementPayload) {
