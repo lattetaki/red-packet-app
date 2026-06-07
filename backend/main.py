@@ -16,10 +16,13 @@ from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, require_admin
 from database import SessionLocal, create_db_and_tables, database_path, get_db
-from models import AmountPreset, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
+from models import AmountPreset, Announcement, AppRole, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
+    AnnouncementCreate,
+    AnnouncementRead,
+    AnnouncementUpdate,
     AppUserCreate,
     AppUserRead,
     AppUserUpdate,
@@ -28,6 +31,7 @@ from schemas import (
     ImportRequest,
     LoginRequest,
     LoginResponse,
+    ParticipantAvatarUpdate,
     ParticipantCreate,
     ParticipantRead,
     RecordCreate,
@@ -35,6 +39,7 @@ from schemas import (
     RecordListResponse,
     RecordUpdate,
     RecordListItem,
+    RecordStatsResponse,
     SummaryStats,
     TrendPoint,
     UserStatsItem,
@@ -44,6 +49,7 @@ from services import (
     build_summary,
     build_trends,
     build_user_stats,
+    build_record_stats,
     create_record,
     active_records_query,
     deleted_records_query,
@@ -165,6 +171,28 @@ def create_participant(payload: ParticipantCreate, _: AppUser = Depends(require_
     return participant
 
 
+@app.put("/participants/{participant_id}/avatar", response_model=ParticipantRead)
+def update_participant_avatar(
+    participant_id: int,
+    payload: ParticipantAvatarUpdate,
+    current_user: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    participant = db.get(Participant, participant_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Participant not found")
+
+    avatar = payload.avatar_data_url
+    if avatar and not avatar.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="Avatar must be an image data URL")
+
+    participant.avatar_data_url = avatar
+    db.commit()
+    db.refresh(participant)
+    logger.info("participant avatar updated id=%s user_id=%s has_avatar=%s", participant_id, current_user.id, bool(avatar))
+    return participant
+
+
 @app.get("/admin/app-users", response_model=list[AppUserRead])
 def list_app_users(_: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     return db.scalars(select(AppUser).order_by(AppUser.role, AppUser.username)).all()
@@ -230,6 +258,47 @@ def list_amount_presets(_: AppUser = Depends(get_current_user), db: Session = De
         {"id": preset.id, "amount": cents_to_amount(preset.amount_cents), "is_active": preset.is_active}
         for preset in presets
     ]
+
+
+@app.get("/announcements", response_model=list[AnnouncementRead])
+def list_announcements(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.scalars(select(Announcement).order_by(Announcement.created_at.desc(), Announcement.id.desc())).all()
+
+
+@app.post("/admin/announcements", response_model=AnnouncementRead)
+def create_announcement(payload: AnnouncementCreate, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    announcement = Announcement(
+        title=payload.title.strip(),
+        version=payload.version.strip(),
+        content=payload.content.strip(),
+        created_by_user_id=current_user.id,
+    )
+    db.add(announcement)
+    db.commit()
+    db.refresh(announcement)
+    logger.info("announcement created id=%s user_id=%s version=%s", announcement.id, current_user.id, announcement.version)
+    return announcement
+
+
+@app.put("/admin/announcements/{announcement_id}", response_model=AnnouncementRead)
+def update_announcement(
+    announcement_id: int,
+    payload: AnnouncementUpdate,
+    current_user: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    announcement = db.get(Announcement, announcement_id)
+    if announcement is None:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+
+    announcement.title = payload.title.strip()
+    announcement.version = payload.version.strip()
+    announcement.content = payload.content.strip()
+    announcement.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(announcement)
+    logger.info("announcement updated id=%s user_id=%s version=%s", announcement.id, current_user.id, announcement.version)
+    return announcement
 
 
 @app.get("/records", response_model=RecordListResponse)
@@ -417,6 +486,11 @@ def stats_users(_: AppUser = Depends(get_current_user), db: Session = Depends(ge
 @app.get("/stats/trends", response_model=list[TrendPoint])
 def stats_trends(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     return build_trends(db)
+
+
+@app.get("/stats/records", response_model=RecordStatsResponse)
+def stats_records(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    return build_record_stats(db)
 
 
 @app.post("/admin/import-json", response_model=ImportReport)

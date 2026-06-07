@@ -7,11 +7,16 @@ class ParticipantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class ParticipantAvatarUpdate(BaseModel):
+    avatar_data_url: str | None = Field(default=None, max_length=500_000)
+
+
 class ParticipantRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     name: str
+    avatar_data_url: str | None = None
     is_active: bool
 
 
@@ -54,6 +59,28 @@ class AppUserUpdate(BaseModel):
     role: str = "viewer"
     is_active: bool = True
     password: str = ""
+
+
+class AnnouncementCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    version: str = Field(min_length=1, max_length=40)
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class AnnouncementUpdate(AnnouncementCreate):
+    pass
+
+
+class AnnouncementRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    version: str
+    content: str
+    created_by_user_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ClaimCreate(BaseModel):
@@ -138,6 +165,48 @@ class TrendPoint(BaseModel):
     participant_id: int
     participant_name: str
     pnl_amount: str
+
+
+class StatsParticipant(BaseModel):
+    id: int
+    name: str
+    avatar_data_url: str | None = None
+
+
+class ClaimRecordStat(BaseModel):
+    participant: StatsParticipant
+    sender: StatsParticipant
+    amount: str
+    record_id: int
+    time: datetime
+
+
+class StreakRecordStat(BaseModel):
+    participant: StatsParticipant
+    count: int
+
+
+class CounterpartyRecordStat(BaseModel):
+    participant: StatsParticipant
+    amount: str
+
+
+class PersonalRecordStats(BaseModel):
+    participant: StatsParticipant
+    max_claim: ClaimRecordStat | None
+    min_claim: ClaimRecordStat | None
+    max_win_streak: int
+    max_loss_streak: int
+    top_received_from: CounterpartyRecordStat | None
+    top_sent_to: CounterpartyRecordStat | None
+
+
+class RecordStatsResponse(BaseModel):
+    max_claims: list[ClaimRecordStat]
+    min_claims: list[ClaimRecordStat]
+    max_win_streaks: list[StreakRecordStat]
+    max_loss_streaks: list[StreakRecordStat]
+    personal: list[PersonalRecordStats]
 
 
 class ImportRequest(BaseModel):

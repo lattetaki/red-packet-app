@@ -8,12 +8,15 @@ import {
   Download,
   Gift,
   Home,
+  ImageUp,
   LockKeyhole,
   LogOut,
   ListChecks,
+  Medal,
   Plus,
   RotateCcw,
   Search,
+  Trophy,
   Users,
 } from 'lucide-react'
 import type { ElementType } from 'react'
@@ -22,6 +25,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   approveRecord,
+  createAnnouncement,
   createBackup,
   createAppUser,
   createParticipant,
@@ -29,12 +33,14 @@ import {
   deleteRecord,
   downloadBackup,
   getAmountPresets,
+  getAnnouncements,
   getAppUsers,
   getBackups,
   getDeletedRecords,
   getParticipants,
   getRecord,
   getRecords,
+  getRecordStats,
   getMyRecords,
   getRecentRecords,
   getSummaryStats,
@@ -42,26 +48,36 @@ import {
   getUserStats,
   login,
   setAuthToken,
+  type Announcement,
+  type AnnouncementPayload,
   type AppUser,
   type AppUserCreatePayload,
   type AppUserUpdatePayload,
   type AmountPreset,
   type BackupInfo,
+  type ClaimRecordStat,
+  type CounterpartyRecordStat,
   type Participant,
+  type PersonalRecordStats,
   type RecordCreatePayload,
   type RecordDetail,
   type RecordListItem,
+  type RecordStatsResponse,
+  type StatsParticipant,
+  type StreakRecordStat,
   type SummaryStats,
   type TrendPoint,
   type UserStatsItem,
   rejectRecord,
   restoreDeletedRecord,
+  updateAnnouncement,
   updateAppUser,
+  updateParticipantAvatar,
   updateRecord,
 } from './api'
 import './App.css'
 
-type ViewKey = 'dashboard' | 'entry' | 'records' | 'review' | 'deleted' | 'users' | 'backup' | 'import'
+type ViewKey = 'dashboard' | 'entry' | 'records' | 'recordStats' | 'announcements' | 'review' | 'deleted' | 'users' | 'backup' | 'import'
 
 type SummaryItem = {
   label: string
@@ -88,10 +104,27 @@ type AuthSession = {
   token: string
 }
 
+type AvatarCropState = {
+  participant: Participant
+  sourceUrl: string
+  imageWidth: number
+  imageHeight: number
+  scale: number
+  offsetX: number
+  offsetY: number
+  dragging: boolean
+  dragStartX: number
+  dragStartY: number
+  dragOriginX: number
+  dragOriginY: number
+}
+
 const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '首页', icon: Home, key: 'dashboard' },
   { label: '录入', icon: Plus, key: 'entry' },
   { label: '记录列表', icon: ListChecks, key: 'records' },
+  { label: '记录统计', icon: Trophy, key: 'recordStats' },
+  { label: '更新公告', icon: BookOpen, key: 'announcements' },
   { label: '审核队列', icon: LockKeyhole, key: 'review' },
   { label: '已删除记录', icon: RotateCcw, key: 'deleted' },
   { label: '用户管理', icon: Users, key: 'users' },
@@ -99,12 +132,14 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '数据导入', icon: Database, key: 'import' },
 ]
 
-const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records'])
+const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records', 'recordStats', 'announcements'])
 const savedUserKey = 'red-packet-current-user'
 const senderDefaultsKey = 'red-packet-sender-default-amounts'
 const appEnvironmentLabel = import.meta.env.VITE_APP_ENV_LABEL ?? ''
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
+const avatarCropPreviewSize = 280
+const avatarOutputSize = 256
 
 const fallbackSummary: SummaryStats = {
   record_count: 0,
@@ -112,6 +147,14 @@ const fallbackSummary: SummaryStats = {
   total_sent_amount: '0',
   total_claimed_amount: '0',
   pending_count: 0,
+}
+
+const fallbackRecordStats: RecordStatsResponse = {
+  max_claims: [],
+  min_claims: [],
+  max_win_streaks: [],
+  max_loss_streaks: [],
+  personal: [],
 }
 
 function formatMoney(amount: string) {
@@ -126,6 +169,42 @@ function formatBytes(value: number) {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function initials(name: string) {
+  return name.trim().slice(0, 2).toUpperCase() || '?'
+}
+
+function AvatarBubble({ participant, size = 'md' }: { participant: StatsParticipant | Participant; size?: 'sm' | 'md' | 'lg' | 'xl' }) {
+  const sizes = {
+    sm: 'size-9 text-xs',
+    md: 'size-11 text-sm',
+    lg: 'size-14 text-base',
+    xl: 'size-20 text-xl',
+  }
+
+  return (
+    <div className={`shrink-0 overflow-hidden rounded-lg bg-red-50 font-semibold text-red-700 ring-1 ring-red-100 ${sizes[size]}`}>
+      {participant.avatar_data_url ? (
+        <img className="size-full object-cover" src={participant.avatar_data_url} alt={`${participant.name} avatar`} />
+      ) : (
+        <div className="flex size-full items-center justify-center">{initials(participant.name)}</div>
+      )}
+    </div>
+  )
+}
+
+function readImageFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('File read failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
 }
 
 function formatRole(role: AppUser['role']) {
@@ -319,6 +398,14 @@ function App() {
   const [creatingBackup, setCreatingBackup] = useState(false)
   const [downloadingBackup, setDownloadingBackup] = useState<string | null>(null)
   const [userStats, setUserStats] = useState<UserStatsItem[]>([])
+  const [recordStats, setRecordStats] = useState<RecordStatsResponse>(fallbackRecordStats)
+  const [announcements, setAnnouncements] = useState<Announcement[]>([])
+  const [expandedAnnouncementIds, setExpandedAnnouncementIds] = useState<Set<number>>(new Set())
+  const [announcementDraft, setAnnouncementDraft] = useState<AnnouncementPayload>({ title: '', version: '', content: '' })
+  const [editingAnnouncementId, setEditingAnnouncementId] = useState<number | null>(null)
+  const [announcementMessage, setAnnouncementMessage] = useState<string | null>(null)
+  const [announcementError, setAnnouncementError] = useState<string | null>(null)
+  const [savingAnnouncement, setSavingAnnouncement] = useState(false)
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [appUsers, setAppUsers] = useState<AppUser[]>([])
@@ -337,6 +424,9 @@ function App() {
   const [senderDefaultAmounts, setSenderDefaultAmounts] = useState<Record<string, string>>(() => readSenderDefaults())
   const [selectedTrendUserIds, setSelectedTrendUserIds] = useState<Set<number>>(new Set())
   const [selectedStatsUserId, setSelectedStatsUserId] = useState('')
+  const [selectedRecordStatsUserId, setSelectedRecordStatsUserId] = useState('')
+  const [savingAvatarParticipantId, setSavingAvatarParticipantId] = useState<number | null>(null)
+  const [avatarCrop, setAvatarCrop] = useState<AvatarCropState | null>(null)
   const [entryTime, setEntryTime] = useState(currentDateTimeLocal())
   const [senderId, setSenderId] = useState('')
   const [totalAmount, setTotalAmount] = useState('10')
@@ -389,6 +479,8 @@ function App() {
       backupData,
       myRecordData,
       userStatsData,
+      recordStatsData,
+      announcementData,
       trendData,
       participantData,
       presetData,
@@ -401,6 +493,8 @@ function App() {
       isAdmin ? getBackups() : Promise.resolve([]),
       getMyRecords({ limit: 10 }),
       getUserStats(),
+      getRecordStats(),
+      getAnnouncements(),
       getTrendPoints(),
       getParticipants(),
       getAmountPresets(),
@@ -417,6 +511,9 @@ function App() {
     setMyRecords(myRecordData.items)
     setMyRecordTotal(myRecordData.total)
     setUserStats(userStatsData)
+    setRecordStats(recordStatsData)
+    setAnnouncements(announcementData)
+    setExpandedAnnouncementIds((current) => (current.size ? current : new Set(announcementData[0] ? [announcementData[0].id] : [])))
     setTrendPoints(trendData)
     setParticipants(participantData)
     setAmountPresets(presetData)
@@ -633,6 +730,187 @@ function App() {
     }
   }
 
+  async function handleAvatarFile(participant: Participant, file: File | undefined) {
+    if (!file) return
+    setParticipantMessage(null)
+    setParticipantError(null)
+
+    try {
+      const sourceUrl = await readImageFile(file)
+      setAvatarCrop({
+        participant,
+        sourceUrl,
+        imageWidth: 0,
+        imageHeight: 0,
+        scale: 1,
+        offsetX: 0,
+        offsetY: 0,
+        dragging: false,
+        dragStartX: 0,
+        dragStartY: 0,
+        dragOriginX: 0,
+        dragOriginY: 0,
+      })
+    } catch {
+      setParticipantError('读取图片失败，请确认选择的是图片文件。')
+    }
+  }
+
+  function clampAvatarOffset(crop: Pick<AvatarCropState, 'imageWidth' | 'imageHeight' | 'scale' | 'offsetX' | 'offsetY'>) {
+    const displayWidth = crop.imageWidth * crop.scale
+    const displayHeight = crop.imageHeight * crop.scale
+    const maxX = Math.max(0, (displayWidth - avatarCropPreviewSize) / 2)
+    const maxY = Math.max(0, (displayHeight - avatarCropPreviewSize) / 2)
+    return {
+      offsetX: clamp(crop.offsetX, -maxX, maxX),
+      offsetY: clamp(crop.offsetY, -maxY, maxY),
+    }
+  }
+
+  function initializeAvatarCrop(width: number, height: number) {
+    setAvatarCrop((current) => {
+      if (!current) return current
+      const minScale = Math.max(avatarCropPreviewSize / width, avatarCropPreviewSize / height)
+      return {
+        ...current,
+        imageWidth: width,
+        imageHeight: height,
+        scale: minScale,
+        offsetX: 0,
+        offsetY: 0,
+      }
+    })
+  }
+
+  function updateAvatarCropScale(nextScale: number) {
+    setAvatarCrop((current) => {
+      if (!current || !current.imageWidth || !current.imageHeight) return current
+      const minScale = Math.max(avatarCropPreviewSize / current.imageWidth, avatarCropPreviewSize / current.imageHeight)
+      const scale = clamp(nextScale, minScale, minScale * 4)
+      const offsets = clampAvatarOffset({ ...current, scale })
+      return { ...current, scale, ...offsets }
+    })
+  }
+
+  async function confirmAvatarCrop() {
+    if (!avatarCrop || !avatarCrop.imageWidth || !avatarCrop.imageHeight) return
+
+    try {
+      setSavingAvatarParticipantId(avatarCrop.participant.id)
+      const image = new Image()
+      image.src = avatarCrop.sourceUrl
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve()
+        image.onerror = () => reject(new Error('Image load failed'))
+      })
+
+      const displayWidth = avatarCrop.imageWidth * avatarCrop.scale
+      const displayHeight = avatarCrop.imageHeight * avatarCrop.scale
+      const left = avatarCropPreviewSize / 2 - displayWidth / 2 + avatarCrop.offsetX
+      const top = avatarCropPreviewSize / 2 - displayHeight / 2 + avatarCrop.offsetY
+      const sourceX = Math.max(0, -left / avatarCrop.scale)
+      const sourceY = Math.max(0, -top / avatarCrop.scale)
+      const sourceSize = avatarCropPreviewSize / avatarCrop.scale
+      const canvas = document.createElement('canvas')
+      canvas.width = avatarOutputSize
+      canvas.height = avatarOutputSize
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('Canvas is not available')
+
+      context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, avatarOutputSize, avatarOutputSize)
+      const avatarDataUrl = canvas.toDataURL('image/jpeg', 0.88)
+      const updated = await updateParticipantAvatar(avatarCrop.participant.id, avatarDataUrl)
+      setParticipants((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      setParticipantMessage(`${avatarCrop.participant.name} 的头像已更新。`)
+      setAvatarCrop(null)
+      await loadDashboardData()
+    } catch {
+      setParticipantError('头像保存失败，请重新选择图片。')
+    } finally {
+      setSavingAvatarParticipantId(null)
+    }
+  }
+
+  async function clearAvatar(participant: Participant) {
+    setParticipantMessage(null)
+    setParticipantError(null)
+
+    try {
+      setSavingAvatarParticipantId(participant.id)
+      const updated = await updateParticipantAvatar(participant.id, null)
+      setParticipants((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      setParticipantMessage(`${participant.name} 的头像已清空。`)
+      await loadDashboardData()
+    } catch {
+      setParticipantError('清空头像失败，请稍后重试。')
+    } finally {
+      setSavingAvatarParticipantId(null)
+    }
+  }
+
+  function resetAnnouncementDraft() {
+    setAnnouncementDraft({ title: '', version: '', content: '' })
+    setEditingAnnouncementId(null)
+    setAnnouncementError(null)
+    setAnnouncementMessage(null)
+  }
+
+  function editAnnouncement(announcement: Announcement) {
+    setAnnouncementDraft({
+      title: announcement.title,
+      version: announcement.version,
+      content: announcement.content,
+    })
+    setEditingAnnouncementId(announcement.id)
+    setAnnouncementError(null)
+    setAnnouncementMessage(null)
+    setExpandedAnnouncementIds((current) => new Set(current).add(announcement.id))
+  }
+
+  function toggleAnnouncement(announcementId: number) {
+    setExpandedAnnouncementIds((current) => {
+      const next = new Set(current)
+      if (next.has(announcementId)) {
+        next.delete(announcementId)
+      } else {
+        next.add(announcementId)
+      }
+      return next
+    })
+  }
+
+  async function saveAnnouncement() {
+    setAnnouncementMessage(null)
+    setAnnouncementError(null)
+
+    if (!announcementDraft.title.trim() || !announcementDraft.version.trim() || !announcementDraft.content.trim()) {
+      setAnnouncementError('标题、版本号和更新内容都需要填写。')
+      return
+    }
+
+    try {
+      setSavingAnnouncement(true)
+      const payload = {
+        title: announcementDraft.title.trim(),
+        version: announcementDraft.version.trim(),
+        content: announcementDraft.content.trim(),
+      }
+      const saved = editingAnnouncementId
+        ? await updateAnnouncement(editingAnnouncementId, payload)
+        : await createAnnouncement(payload)
+      const nextAnnouncements = await getAnnouncements()
+      setAnnouncements(nextAnnouncements)
+      setExpandedAnnouncementIds((current) => new Set(current).add(saved.id))
+      setAnnouncementDraft({ title: '', version: '', content: '' })
+      setEditingAnnouncementId(null)
+      setAnnouncementMessage(editingAnnouncementId ? '更新公告已保存。' : '更新公告已发布。')
+    } catch {
+      setAnnouncementError('保存更新公告失败，请稍后重试。')
+    } finally {
+      setSavingAnnouncement(false)
+    }
+  }
+
   useEffect(() => {
     let active = true
 
@@ -710,6 +988,9 @@ function App() {
 
   const latestTrendByUser = buildLatestTrendByUser(trendPoints)
   const selectedStatsUser = selectedStatsUserId ? userStats.find((item) => String(item.participant_id) === selectedStatsUserId) : undefined
+  const selectedRecordStatsUser = selectedRecordStatsUserId
+    ? recordStats.personal.find((item) => String(item.participant.id) === selectedRecordStatsUserId)
+    : undefined
   const maxAbsPnl = Math.max(1, ...userStats.map((item) => Math.abs(toNumber(item.pnl_amount))))
   const claimTotal = sumClaimAmounts(entryClaims)
   const amountMismatch = Math.abs(claimTotal - toNumber(totalAmount)) > 0.001
@@ -724,6 +1005,12 @@ function App() {
   }
 
   function renderPersonalStats(user: UserStatsItem) {
+    const participant = participants.find((item) => item.id === user.participant_id) ?? {
+      id: user.participant_id,
+      name: user.name,
+      avatar_data_url: null,
+      is_active: true,
+    }
     const metrics = [
       { label: '发包数', value: user.send_count, rank: getUserRank(user, 'send_count'), color: 'bg-violet-500' },
       { label: '抢包数', value: user.receive_count, rank: getUserRank(user, 'receive_count'), color: 'bg-violet-500' },
@@ -748,6 +1035,13 @@ function App() {
 
     return (
       <div className="border-b border-slate-100 p-5">
+        <div className="mb-5 flex items-center gap-4">
+          <AvatarBubble participant={participant} size="xl" />
+          <div>
+            <h3 className="text-lg font-semibold">{user.name}</h3>
+            <p className="mt-1 text-sm text-slate-500">个人累计统计与排名</p>
+          </div>
+        </div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {[
             { label: '发包金额', value: formatMoney(user.send_amount), rank: getUserRank(user, 'send_amount') },
@@ -786,6 +1080,284 @@ function App() {
             对局发包率：{user.send_ratio}（{getUserRank(user, 'send_ratio_number')}）
           </p>
         </div>
+      </div>
+    )
+  }
+
+  function renderClaimLine(item: ClaimRecordStat | null, emptyText = '暂无记录') {
+    if (!item) return <span>{emptyText}</span>
+    return (
+      <span>
+        {item.participant.name} 领到 {item.sender.name} 的 {formatMoney(item.amount)}
+      </span>
+    )
+  }
+
+  function renderCounterpartyLine(item: CounterpartyRecordStat | null, prefix: string) {
+    if (!item) return <span>暂无记录</span>
+    return (
+      <span>
+        {prefix} {item.participant.name}：{formatMoney(item.amount)}
+      </span>
+    )
+  }
+
+  function renderTopClaimCard(title: string, items: ClaimRecordStat[], tone: 'best' | 'low') {
+    const champion = items[0]
+    const accent = tone === 'best' ? 'text-red-700' : 'text-blue-700'
+    const bg = tone === 'best' ? 'bg-red-50 ring-red-100' : 'bg-blue-50 ring-blue-100'
+
+    return (
+      <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-slate-500">{title}</p>
+            {champion ? (
+              <>
+                <div className="mt-4 flex items-center gap-3">
+                  <AvatarBubble participant={champion.participant} size="lg" />
+                  <div>
+                    <p className="font-semibold">{champion.participant.name}</p>
+                    <p className={`mt-1 text-2xl font-semibold ${accent}`}>{formatMoney(champion.amount)}</p>
+                  </div>
+                </div>
+                <p className="mt-3 text-sm text-slate-500">领到 {champion.sender.name} 的包</p>
+              </>
+            ) : (
+              <p className="mt-5 text-sm text-slate-500">暂无记录</p>
+            )}
+          </div>
+          <div className={`flex size-10 items-center justify-center rounded-lg ring-1 ${bg}`}>
+            <Medal className="size-5" />
+          </div>
+        </div>
+        <div className="mt-4 space-y-1 text-sm text-slate-500">
+          <p>第二名：{renderClaimLine(items[1] ?? null)}</p>
+          <p>第三名：{renderClaimLine(items[2] ?? null)}</p>
+        </div>
+      </article>
+    )
+  }
+
+  function renderTopStreakCard(title: string, items: StreakRecordStat[], helper: string, tone: 'win' | 'loss') {
+    const champion = items[0]
+    const accent = tone === 'win' ? 'text-emerald-700' : 'text-amber-700'
+    const bg = tone === 'win' ? 'bg-emerald-50 ring-emerald-100' : 'bg-amber-50 ring-amber-100'
+
+    return (
+      <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-slate-500">{title}</p>
+            {champion ? (
+              <>
+                <div className="mt-4 flex items-center gap-3">
+                  <AvatarBubble participant={champion.participant} size="lg" />
+                  <div>
+                    <p className="font-semibold">{champion.participant.name}</p>
+                    <p className={`mt-1 text-2xl font-semibold ${accent}`}>{champion.count} 场</p>
+                  </div>
+                </div>
+                <p className="mt-3 text-sm text-slate-500">{helper}</p>
+              </>
+            ) : (
+              <p className="mt-5 text-sm text-slate-500">暂无记录</p>
+            )}
+          </div>
+          <div className={`flex size-10 items-center justify-center rounded-lg ring-1 ${bg}`}>
+            <Trophy className="size-5" />
+          </div>
+        </div>
+        <div className="mt-4 space-y-1 text-sm text-slate-500">
+          <p>第二名：{items[1] ? `${items[1].participant.name}，${items[1].count} 场` : '暂无记录'}</p>
+          <p>第三名：{items[2] ? `${items[2].participant.name}，${items[2].count} 场` : '暂无记录'}</p>
+        </div>
+      </article>
+    )
+  }
+
+  function renderRecordStatsPersonal(item: PersonalRecordStats) {
+    const cards = [
+      { label: '最大红包', value: item.max_claim ? formatMoney(item.max_claim.amount) : '-', detail: item.max_claim ? `来自 ${item.max_claim.sender.name}` : '暂无记录' },
+      { label: '最小红包', value: item.min_claim ? formatMoney(item.min_claim.amount) : '-', detail: item.min_claim ? `来自 ${item.min_claim.sender.name}` : '暂无记录' },
+      { label: '最多连胜', value: `${item.max_win_streak} 场`, detail: '参与抢包但未发包的最长连续场次' },
+      { label: '最多连败', value: `${item.max_loss_streak} 场`, detail: '连续发包的最长场次' },
+      { label: '吃米最多', value: item.top_received_from ? formatMoney(item.top_received_from.amount) : '-', detail: renderCounterpartyLine(item.top_received_from, '来自') },
+      { label: '送米最多', value: item.top_sent_to ? formatMoney(item.top_sent_to.amount) : '-', detail: renderCounterpartyLine(item.top_sent_to, '送给') },
+    ]
+
+    return (
+      <div className="border-t border-slate-100 p-5">
+        <div className="flex items-center gap-4">
+          <AvatarBubble participant={item.participant} size="xl" />
+          <div>
+            <h3 className="text-lg font-semibold">{item.participant.name}</h3>
+            <p className="mt-1 text-sm text-slate-500">个人记录峰值与主要往来对象</p>
+          </div>
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {cards.map((card) => (
+            <div key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">{card.label}</p>
+              <p className="mt-2 text-2xl font-semibold">{card.value}</p>
+              <p className="mt-2 text-sm text-slate-500">{card.detail}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  function renderRecordStats() {
+    return (
+      <>
+        <section className="grid gap-5 xl:grid-cols-4">
+          {renderTopClaimCard('最大红包', recordStats.max_claims, 'best')}
+          {renderTopClaimCard('最大倒霉蛋', recordStats.min_claims, 'low')}
+          {renderTopStreakCard('最大连胜', recordStats.max_win_streaks, '不发包的最长连续参与场次', 'win')}
+          {renderTopStreakCard('最大连败', recordStats.max_loss_streaks, '连续发包的最长场次', 'loss')}
+        </section>
+
+        <section className="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold">个人记录概览</h2>
+                <p className="mt-1 text-sm text-slate-500">选择一个用户查看个人最大/最小红包、连胜连败和往来金额。</p>
+              </div>
+              <select
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={selectedRecordStatsUserId}
+                onChange={(event) => setSelectedRecordStatsUserId(event.target.value)}
+              >
+                <option value="">请选择一个用户</option>
+                {recordStats.personal.map((item) => (
+                  <option key={item.participant.id} value={item.participant.id}>
+                    {item.participant.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {selectedRecordStatsUser ? (
+            renderRecordStatsPersonal(selectedRecordStatsUser)
+          ) : (
+            <div className="p-10 text-center text-sm text-slate-500">请选择一个用户。</div>
+          )}
+        </section>
+      </>
+    )
+  }
+
+  function renderAnnouncements() {
+    return (
+      <div className="space-y-5">
+        {isAdmin ? (
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-4">
+              <h2 className="text-base font-semibold">{editingAnnouncementId ? '编辑更新公告' : '发布更新公告'}</h2>
+              <p className="mt-1 text-sm text-slate-500">填写标题、版本号和更新内容，保存后所有用户都可以查看。</p>
+            </div>
+            <div className="space-y-4 p-5">
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-slate-500">标题</span>
+                  <input
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                    value={announcementDraft.title}
+                    onChange={(event) => setAnnouncementDraft((current) => ({ ...current, title: event.target.value }))}
+                    placeholder="例如：记录统计页面上线"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-slate-500">版本号</span>
+                  <input
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                    value={announcementDraft.version}
+                    onChange={(event) => setAnnouncementDraft((current) => ({ ...current, version: event.target.value }))}
+                    placeholder="例如：v0.3.0"
+                  />
+                </label>
+              </div>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-medium text-slate-500">更新内容</span>
+                <textarea
+                  className="min-h-40 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  value={announcementDraft.content}
+                  onChange={(event) => setAnnouncementDraft((current) => ({ ...current, content: event.target.value }))}
+                  placeholder="每行写一条更新内容，普通用户展开公告后会看到这里的完整内容。"
+                />
+              </label>
+
+              {announcementError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{announcementError}</div> : null}
+              {announcementMessage ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{announcementMessage}</div>
+              ) : null}
+
+              <div className="flex flex-wrap justify-end gap-2">
+                {editingAnnouncementId ? (
+                  <Button variant="outline" onClick={resetAnnouncementDraft} disabled={savingAnnouncement}>
+                    取消编辑
+                  </Button>
+                ) : null}
+                <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveAnnouncement} disabled={savingAnnouncement}>
+                  {savingAnnouncement ? '保存中' : editingAnnouncementId ? '保存公告' : '发布公告'}
+                </Button>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">更新公告</h2>
+            <p className="mt-1 text-sm text-slate-500">最新一条公告默认展开，其他公告可点击查看完整内容。</p>
+          </div>
+
+          {announcements.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-500">当前还没有更新公告。</div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {announcements.map((announcement, index) => {
+                const expanded = expandedAnnouncementIds.has(announcement.id) || (expandedAnnouncementIds.size === 0 && index === 0)
+
+                return (
+                  <article key={announcement.id} className="px-5 py-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <button
+                        type="button"
+                        className="min-w-0 text-left"
+                        onClick={() => toggleAnnouncement(announcement.id)}
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-semibold text-slate-950">{announcement.title}</h3>
+                          <span className="rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700">{announcement.version}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">更新时间：{formatTime(announcement.updated_at)}</p>
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" size="xs" onClick={() => toggleAnnouncement(announcement.id)}>
+                          {expanded ? '收起' : '展开'}
+                        </Button>
+                        {isAdmin ? (
+                          <Button variant="outline" size="xs" onClick={() => editAnnouncement(announcement)}>
+                            编辑
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {expanded ? (
+                      <div className="mt-4 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700">
+                        {announcement.content}
+                      </div>
+                    ) : null}
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </section>
       </div>
     )
   }
@@ -2046,6 +2618,115 @@ function App() {
     )
   }
 
+  function renderAvatarCropDialog() {
+    if (!avatarCrop) return null
+
+    const imageReady = Boolean(avatarCrop.imageWidth && avatarCrop.imageHeight)
+    const minScale = imageReady ? Math.max(avatarCropPreviewSize / avatarCrop.imageWidth, avatarCropPreviewSize / avatarCrop.imageHeight) : 1
+    const displayWidth = avatarCrop.imageWidth * avatarCrop.scale
+    const displayHeight = avatarCrop.imageHeight * avatarCrop.scale
+    const left = avatarCropPreviewSize / 2 - displayWidth / 2 + avatarCrop.offsetX
+    const top = avatarCropPreviewSize / 2 - displayHeight / 2 + avatarCrop.offsetY
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+        <section className="w-full max-w-lg rounded-lg border border-slate-200 bg-white shadow-xl">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">裁剪头像</h2>
+            <p className="mt-1 text-sm text-slate-500">拖动图片并调整缩放，正方形框内的部分会保存为头像。</p>
+          </div>
+
+          <div className="space-y-5 p-5">
+            <div className="flex justify-center">
+              <div
+                className="relative overflow-hidden rounded-lg border border-slate-200 bg-slate-100"
+                style={{ width: avatarCropPreviewSize, height: avatarCropPreviewSize }}
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  event.currentTarget.setPointerCapture(event.pointerId)
+                  setAvatarCrop((current) =>
+                    current
+                      ? {
+                          ...current,
+                          dragging: true,
+                          dragStartX: event.clientX,
+                          dragStartY: event.clientY,
+                          dragOriginX: current.offsetX,
+                          dragOriginY: current.offsetY,
+                        }
+                      : current,
+                  )
+                }}
+                onPointerMove={(event) => {
+                  setAvatarCrop((current) => {
+                    if (!current?.dragging) return current
+                    const next = {
+                      ...current,
+                      offsetX: current.dragOriginX + event.clientX - current.dragStartX,
+                      offsetY: current.dragOriginY + event.clientY - current.dragStartY,
+                    }
+                    return { ...next, ...clampAvatarOffset(next) }
+                  })
+                }}
+                onPointerUp={(event) => {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                  setAvatarCrop((current) => (current ? { ...current, dragging: false } : current))
+                }}
+                onPointerCancel={() => setAvatarCrop((current) => (current ? { ...current, dragging: false } : current))}
+              >
+                <img
+                  className="absolute max-w-none select-none"
+                  src={avatarCrop.sourceUrl}
+                  alt="待裁剪头像"
+                  draggable={false}
+                  onLoad={(event) => initializeAvatarCrop(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
+                  style={{
+                    width: displayWidth || 'auto',
+                    height: displayHeight || 'auto',
+                    left,
+                    top,
+                    cursor: avatarCrop.dragging ? 'grabbing' : 'grab',
+                  }}
+                />
+                <div className="pointer-events-none absolute inset-0 rounded-lg ring-2 ring-inset ring-white/90" />
+              </div>
+            </div>
+
+            <label className="block space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-medium text-slate-700">缩放</span>
+                <span className="text-slate-500">{Math.round((avatarCrop.scale / minScale) * 100)}%</span>
+              </div>
+              <input
+                className="w-full accent-red-600"
+                type="range"
+                min={minScale}
+                max={minScale * 4}
+                step={0.01}
+                value={avatarCrop.scale}
+                disabled={!imageReady}
+                onChange={(event) => updateAvatarCropScale(Number(event.target.value))}
+              />
+            </label>
+          </div>
+
+          <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4">
+            <Button variant="outline" onClick={() => setAvatarCrop(null)} disabled={savingAvatarParticipantId === avatarCrop.participant.id}>
+              取消
+            </Button>
+            <Button
+              className="bg-slate-950 text-white hover:bg-slate-800"
+              onClick={confirmAvatarCrop}
+              disabled={!imageReady || savingAvatarParticipantId === avatarCrop.participant.id}
+            >
+              {savingAvatarParticipantId === avatarCrop.participant.id ? '保存中' : '确认使用'}
+            </Button>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   function renderUsers() {
     if (currentRole !== 'admin') {
       return renderPlaceholder('用户管理', '该页面仅管理员可见。')
@@ -2235,18 +2916,45 @@ function App() {
 
           <div className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-3">
             {participants.map((participant) => (
-              <div key={participant.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
-                <div>
-                  <p className="font-medium">{participant.name}</p>
-                  <p className="mt-1 text-xs text-slate-500">参与者 ID：{participant.id}</p>
+              <div key={participant.id} className="rounded-lg border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <AvatarBubble participant={participant} size="lg" />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{participant.name}</p>
+                      <p className="mt-1 text-xs text-slate-500">参与者 ID：{participant.id}</p>
+                    </div>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-medium ${
+                      participant.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {participant.is_active ? '可选择' : '已停用'}
+                  </span>
                 </div>
-                <span
-                  className={`rounded-md px-2 py-1 text-xs font-medium ${
-                    participant.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                  }`}
-                >
-                  {participant.is_active ? '可选择' : '已停用'}
-                </span>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                    <ImageUp className="size-3.5" />
+                    {savingAvatarParticipantId === participant.id ? '处理中' : '上传头像'}
+                    <input
+                      className="hidden"
+                      type="file"
+                      accept="image/*"
+                      disabled={savingAvatarParticipantId === participant.id}
+                      onChange={(event) => {
+                        void handleAvatarFile(participant, event.target.files?.[0])
+                        event.currentTarget.value = ''
+                      }}
+                    />
+                  </label>
+                  {participant.avatar_data_url ? (
+                    <Button variant="outline" size="xs" onClick={() => clearAvatar(participant)} disabled={savingAvatarParticipantId === participant.id}>
+                      清空
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>
@@ -2305,6 +3013,12 @@ function App() {
     }
     if (activeView === 'records') {
       return renderRecords()
+    }
+    if (activeView === 'recordStats') {
+      return renderRecordStats()
+    }
+    if (activeView === 'announcements') {
+      return renderAnnouncements()
     }
     if (activeView === 'review') {
       return renderReviewQueue()
@@ -2420,6 +3134,7 @@ function App() {
           </div>
         </section>
       </div>
+      {renderAvatarCropDialog()}
     </main>
   )
 }

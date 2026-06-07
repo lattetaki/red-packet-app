@@ -70,6 +70,11 @@ def ensure_app_user_setup(db: Session) -> None:
 
 
 def ensure_participant_setup(db: Session) -> None:
+    columns = {row[1] for row in db.execute(text("PRAGMA table_info(participants)"))}
+    if "avatar_data_url" not in columns:
+        db.execute(text("ALTER TABLE participants ADD COLUMN avatar_data_url TEXT"))
+        db.commit()
+
     for name in INITIAL_PARTICIPANTS:
         participant = db.scalar(select(Participant).where(Participant.name == name))
         if participant is None:
@@ -425,6 +430,119 @@ def build_trends(db: Session) -> list[dict]:
             )
 
     return points
+
+
+def participant_summary(participant: Participant) -> dict:
+    return {
+        "id": participant.id,
+        "name": participant.name,
+        "avatar_data_url": participant.avatar_data_url,
+    }
+
+
+def claim_stat(record: RedPacketRecord, claim: RedPacketClaim) -> dict:
+    return {
+        "participant": participant_summary(claim.participant),
+        "sender": participant_summary(record.sender),
+        "amount": cents_to_amount(claim.amount_cents),
+        "record_id": record.id,
+        "time": record.time,
+    }
+
+
+def streak_stat(participant: Participant, count: int) -> dict:
+    return {
+        "participant": participant_summary(participant),
+        "count": count,
+    }
+
+
+def counterparty_stat(participant: Participant, amount_cents: int) -> dict:
+    return {
+        "participant": participant_summary(participant),
+        "amount": cents_to_amount(amount_cents),
+    }
+
+
+def build_record_stats(db: Session) -> dict:
+    participants = db.scalars(select(Participant).order_by(Participant.name)).all()
+    participant_by_id = {participant.id: participant for participant in participants}
+
+    records = db.scalars(
+        select(RedPacketRecord)
+        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
+        .options(
+            selectinload(RedPacketRecord.sender),
+            selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),
+        )
+        .order_by(RedPacketRecord.time.asc(), RedPacketRecord.id.asc())
+    ).all()
+
+    claims = [(record, claim) for record in records for claim in record.claims]
+    max_claims = sorted(claims, key=lambda item: (-item[1].amount_cents, item[0].time, item[0].id))[:3]
+    min_claims = sorted(claims, key=lambda item: (item[1].amount_cents, item[0].time, item[0].id))[:3]
+
+    win_current: defaultdict[int, int] = defaultdict(int)
+    win_best: defaultdict[int, int] = defaultdict(int)
+    loss_current: defaultdict[int, int] = defaultdict(int)
+    loss_best: defaultdict[int, int] = defaultdict(int)
+    personal_max_claim: dict[int, tuple[RedPacketRecord, RedPacketClaim]] = {}
+    personal_min_claim: dict[int, tuple[RedPacketRecord, RedPacketClaim]] = {}
+    received_from: dict[int, defaultdict[int, int]] = defaultdict(lambda: defaultdict(int))
+    sent_to: dict[int, defaultdict[int, int]] = defaultdict(lambda: defaultdict(int))
+
+    for record in records:
+        sender_id = record.sender_id
+        loss_current[sender_id] += 1
+        win_current[sender_id] = 0
+        loss_best[sender_id] = max(loss_best[sender_id], loss_current[sender_id])
+
+        for claim in record.claims:
+            receiver_id = claim.participant_id
+            win_current[receiver_id] += 1
+            loss_current[receiver_id] = 0
+            win_best[receiver_id] = max(win_best[receiver_id], win_current[receiver_id])
+
+            current_max = personal_max_claim.get(receiver_id)
+            if current_max is None or claim.amount_cents > current_max[1].amount_cents:
+                personal_max_claim[receiver_id] = (record, claim)
+
+            current_min = personal_min_claim.get(receiver_id)
+            if current_min is None or claim.amount_cents < current_min[1].amount_cents:
+                personal_min_claim[receiver_id] = (record, claim)
+
+            received_from[receiver_id][sender_id] += claim.amount_cents
+            sent_to[sender_id][receiver_id] += claim.amount_cents
+
+    max_win_streaks = sorted(participants, key=lambda item: (-win_best[item.id], item.name))[:3]
+    max_loss_streaks = sorted(participants, key=lambda item: (-loss_best[item.id], item.name))[:3]
+
+    personal = []
+    for participant in participants:
+        received_rows = sorted(received_from[participant.id].items(), key=lambda item: (-item[1], participant_by_id[item[0]].name))
+        sent_rows = sorted(sent_to[participant.id].items(), key=lambda item: (-item[1], participant_by_id[item[0]].name))
+        max_claim = personal_max_claim.get(participant.id)
+        min_claim = personal_min_claim.get(participant.id)
+
+        personal.append(
+            {
+                "participant": participant_summary(participant),
+                "max_claim": claim_stat(*max_claim) if max_claim else None,
+                "min_claim": claim_stat(*min_claim) if min_claim else None,
+                "max_win_streak": win_best[participant.id],
+                "max_loss_streak": loss_best[participant.id],
+                "top_received_from": counterparty_stat(participant_by_id[received_rows[0][0]], received_rows[0][1]) if received_rows else None,
+                "top_sent_to": counterparty_stat(participant_by_id[sent_rows[0][0]], sent_rows[0][1]) if sent_rows else None,
+            }
+        )
+
+    return {
+        "max_claims": [claim_stat(record, claim) for record, claim in max_claims],
+        "min_claims": [claim_stat(record, claim) for record, claim in min_claims],
+        "max_win_streaks": [streak_stat(participant, win_best[participant.id]) for participant in max_win_streaks],
+        "max_loss_streaks": [streak_stat(participant, loss_best[participant.id]) for participant in max_loss_streaks],
+        "personal": personal,
+    }
 
 
 def reset_imported_data(db: Session) -> None:

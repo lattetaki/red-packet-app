@@ -36,6 +36,7 @@ class Participant(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    avatar_data_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -49,6 +50,18 @@ class AmountPreset(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     amount_cents: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    version: Mapped[str] = mapped_column(String(40), index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class RedPacketRecord(Base):

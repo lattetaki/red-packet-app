@@ -64,6 +64,7 @@ export type TrendPoint = {
 export type Participant = {
   id: number
   name: string
+  avatar_data_url: string | null
   is_active: boolean
 }
 
@@ -90,6 +91,64 @@ export type BackupInfo = {
   filename: string
   size_bytes: number
   created_at: string
+}
+
+export type Announcement = {
+  id: number
+  title: string
+  version: string
+  content: string
+  created_by_user_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export type AnnouncementPayload = {
+  title: string
+  version: string
+  content: string
+}
+
+export type StatsParticipant = {
+  id: number
+  name: string
+  avatar_data_url: string | null
+}
+
+export type ClaimRecordStat = {
+  participant: StatsParticipant
+  sender: StatsParticipant
+  amount: string
+  record_id: number
+  time: string
+}
+
+export type StreakRecordStat = {
+  participant: StatsParticipant
+  count: number
+}
+
+export type CounterpartyRecordStat = {
+  participant: StatsParticipant
+  amount: string
+}
+
+export type PersonalRecordStats = {
+  participant: StatsParticipant
+  max_claim: ClaimRecordStat | null
+  min_claim: ClaimRecordStat | null
+  max_win_streak: number
+  max_loss_streak: number
+  top_received_from: CounterpartyRecordStat | null
+  top_sent_to: CounterpartyRecordStat | null
+}
+
+export type RecordStatsResponse = {
+  max_claims: ClaimRecordStat[]
+  min_claims: ClaimRecordStat[]
+  max_win_streaks: StreakRecordStat[]
+  max_loss_streaks: StreakRecordStat[]
+  personal: PersonalRecordStats[]
 }
 
 export type AppUserCreatePayload = {
@@ -239,6 +298,10 @@ export function getTrendPoints() {
   return getJson<TrendPoint[]>('/stats/trends')
 }
 
+export function getRecordStats() {
+  return getJson<RecordStatsResponse>('/stats/records')
+}
+
 export function getParticipants() {
   return getJson<Participant[]>('/participants')
 }
@@ -247,8 +310,24 @@ export function createParticipant(name: string) {
   return postJson<Participant, { name: string }>('/participants', { name })
 }
 
+export function updateParticipantAvatar(participantId: number, avatarDataUrl: string | null) {
+  return putJson<Participant, { avatar_data_url: string | null }>(`/participants/${participantId}/avatar`, { avatar_data_url: avatarDataUrl })
+}
+
 export function getAmountPresets() {
   return getJson<AmountPreset[]>('/amount-presets')
+}
+
+export function getAnnouncements() {
+  return getJson<Announcement[]>('/announcements')
+}
+
+export function createAnnouncement(payload: AnnouncementPayload) {
+  return postJson<Announcement, AnnouncementPayload>('/admin/announcements', payload)
+}
+
+export function updateAnnouncement(announcementId: number, payload: AnnouncementPayload) {
+  return putJson<Announcement, AnnouncementPayload>(`/admin/announcements/${announcementId}`, payload)
 }
 
 export function getAppUsers() {
