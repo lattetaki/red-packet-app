@@ -40,10 +40,26 @@ INITIAL_APP_USERS = (
 INITIAL_PARTICIPANTS = ("sheep", "white", "堃堃", "小周", "小熙", "小韬", "帅少", "怠惰", "李哥", "牢保", "老功")
 
 
+def serialize_app_user(user: AppUser) -> dict:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "participant_id": user.participant_id,
+        "participant_name": user.participant.name if user.participant else None,
+        "avatar_data_url": user.participant.avatar_data_url if user.participant else None,
+        "role": user.role,
+        "is_active": user.is_active,
+    }
+
+
 def ensure_app_user_setup(db: Session) -> None:
     columns = {row[1] for row in db.execute(text("PRAGMA table_info(app_users)"))}
     if "password_hash" not in columns:
         db.execute(text("ALTER TABLE app_users ADD COLUMN password_hash VARCHAR(255) DEFAULT ''"))
+        db.commit()
+    if "participant_id" not in columns:
+        db.execute(text("ALTER TABLE app_users ADD COLUMN participant_id INTEGER"))
         db.commit()
 
     for item in INITIAL_APP_USERS:
@@ -65,6 +81,32 @@ def ensure_app_user_setup(db: Session) -> None:
         user.is_active = True
         if not user.password_hash:
             user.password_hash = hash_password(item["password"])
+
+    for participant in db.scalars(select(Participant)).all():
+        user = db.scalar(select(AppUser).where(AppUser.username == participant.name))
+        linked_user = db.scalar(select(AppUser).where(AppUser.participant_id == participant.id))
+        if user is None and linked_user is None:
+            db.add(
+                AppUser(
+                    username=participant.name,
+                    display_name=participant.name,
+                    participant_id=participant.id,
+                    password_hash=hash_password("123456"),
+                    role=AppRole.viewer.value,
+                    is_active=True,
+                )
+            )
+            continue
+
+        target = user or linked_user
+        if target:
+            target.participant_id = participant.id
+            if not target.password_hash:
+                target.password_hash = hash_password("123456")
+            if target.username == participant.name and target.role != AppRole.admin.value:
+                target.display_name = participant.name
+                target.role = AppRole.viewer.value
+                target.is_active = True
 
     db.commit()
 
@@ -96,6 +138,13 @@ def ensure_record_soft_delete_columns(db: Session) -> None:
         db.execute(text("ALTER TABLE red_packet_records ADD COLUMN deleted_at DATETIME"))
         changed = True
     if changed:
+        db.commit()
+
+
+def ensure_popup_notice_columns(db: Session) -> None:
+    columns = {row[1] for row in db.execute(text("PRAGMA table_info(popup_notices)"))}
+    if columns and "title" not in columns:
+        db.execute(text("ALTER TABLE popup_notices ADD COLUMN title VARCHAR(120) DEFAULT '小公告'"))
         db.commit()
 
 
@@ -295,18 +344,27 @@ def deleted_records_query():
     return get_record_query().where(RedPacketRecord.deleted_at.is_not(None))
 
 
-def build_summary(db: Session) -> dict:
+def apply_record_date_range(query, date_from: datetime | None = None, date_to: datetime | None = None):
+    if date_from:
+        query = query.where(RedPacketRecord.time >= date_from)
+    if date_to:
+        query = query.where(RedPacketRecord.time <= date_to)
+    return query
+
+
+def build_summary(db: Session, date_from: datetime | None = None, date_to: datetime | None = None) -> dict:
     approved_records = db.scalars(
-        select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
-        .options(selectinload(RedPacketRecord.claims))
+        apply_record_date_range(
+            select(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None)),
+            date_from,
+            date_to,
+        ).options(selectinload(RedPacketRecord.claims))
     ).all()
 
-    pending_count = db.scalar(
-        select(func.count())
-        .select_from(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.pending.value, RedPacketRecord.deleted_at.is_(None))
+    pending_query = select(func.count()).select_from(RedPacketRecord).where(
+        RedPacketRecord.status == RecordStatus.pending.value, RedPacketRecord.deleted_at.is_(None)
     )
+    pending_count = db.scalar(apply_record_date_range(pending_query, date_from, date_to))
     participant_count = db.scalar(select(func.count()).select_from(Participant).where(Participant.is_active.is_(True)))
 
     total_sent = sum(record.total_amount_cents for record in approved_records)
@@ -321,7 +379,7 @@ def build_summary(db: Session) -> dict:
     }
 
 
-def build_user_stats(db: Session) -> list[dict]:
+def build_user_stats(db: Session, date_from: datetime | None = None, date_to: datetime | None = None) -> list[dict]:
     participants = db.scalars(select(Participant).order_by(Participant.name)).all()
     stats = {
         item.id: {
@@ -336,9 +394,11 @@ def build_user_stats(db: Session) -> list[dict]:
     }
 
     records = db.scalars(
-        select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
-        .options(selectinload(RedPacketRecord.sender), selectinload(RedPacketRecord.claims))
+        apply_record_date_range(
+            select(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None)),
+            date_from,
+            date_to,
+        ).options(selectinload(RedPacketRecord.sender), selectinload(RedPacketRecord.claims))
     ).all()
 
     for record in records:
@@ -392,10 +452,13 @@ def build_user_stats(db: Session) -> list[dict]:
     return rows
 
 
-def build_trends(db: Session) -> list[dict]:
+def build_trends(db: Session, date_from: datetime | None = None, date_to: datetime | None = None) -> list[dict]:
     records = db.scalars(
-        select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
+        apply_record_date_range(
+            select(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None)),
+            date_from,
+            date_to,
+        )
         .options(
             selectinload(RedPacketRecord.sender),
             selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),
@@ -464,13 +527,16 @@ def counterparty_stat(participant: Participant, amount_cents: int) -> dict:
     }
 
 
-def build_record_stats(db: Session) -> dict:
+def build_record_stats(db: Session, date_from: datetime | None = None, date_to: datetime | None = None) -> dict:
     participants = db.scalars(select(Participant).order_by(Participant.name)).all()
     participant_by_id = {participant.id: participant for participant in participants}
 
     records = db.scalars(
-        select(RedPacketRecord)
-        .where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None))
+        apply_record_date_range(
+            select(RedPacketRecord).where(RedPacketRecord.status == RecordStatus.approved.value, RedPacketRecord.deleted_at.is_(None)),
+            date_from,
+            date_to,
+        )
         .options(
             selectinload(RedPacketRecord.sender),
             selectinload(RedPacketRecord.claims).selectinload(RedPacketClaim.participant),

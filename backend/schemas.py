@@ -32,6 +32,9 @@ class AppUserRead(BaseModel):
     id: int
     username: str
     display_name: str
+    participant_id: int | None = None
+    participant_name: str | None = None
+    avatar_data_url: str | None = None
     role: str
     is_active: bool
 
@@ -50,15 +53,22 @@ class AppUserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     display_name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=1, max_length=120)
+    participant_id: int | None = None
     role: str = "viewer"
     is_active: bool = True
 
 
 class AppUserUpdate(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
+    participant_id: int | None = None
     role: str = "viewer"
     is_active: bool = True
     password: str = ""
+
+
+class PasswordChange(BaseModel):
+    old_password: str = Field(min_length=1, max_length=120)
+    new_password: str = Field(min_length=6, max_length=20)
 
 
 class AnnouncementCreate(BaseModel):
@@ -146,6 +156,47 @@ class PinnedNoticeRead(BaseModel):
 
 class PinnedNoticeUpdate(BaseModel):
     content: str = Field(default="", max_length=500)
+
+
+class PopupNoticeCreate(BaseModel):
+    title: str = Field(default="小公告", min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=2_000)
+    recipient_user_ids: list[int] = Field(min_length=1)
+    is_active: bool = True
+
+
+class PopupNoticeUpdate(PopupNoticeCreate):
+    pass
+
+
+class PopupNoticeAck(BaseModel):
+    dismiss: bool = False
+
+
+class PopupNoticeRecipientRead(BaseModel):
+    user_id: int
+    username: str
+    display_name: str
+    seen_at: datetime | None = None
+    dismissed_at: datetime | None = None
+
+
+class PopupNoticeRead(BaseModel):
+    id: int
+    title: str
+    content: str
+    is_active: bool
+    created_by_user_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    recipients: list[PopupNoticeRecipientRead] = []
+
+
+class PopupNoticeCurrent(BaseModel):
+    id: int
+    title: str
+    content: str
+    created_at: datetime
 
 
 class SummaryStats(BaseModel):

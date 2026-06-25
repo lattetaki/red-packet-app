@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  Bell,
   BookOpen,
   CalendarDays,
   Check,
@@ -12,24 +13,31 @@ import {
   LockKeyhole,
   LogOut,
   ListChecks,
+  Menu,
   Medal,
+  MonitorSmartphone,
   Plus,
   RotateCcw,
   Search,
   Trophy,
+  UserCircle,
   Users,
+  X,
 } from 'lucide-react'
-import type { ElementType } from 'react'
+import type { ElementType, TouchEvent } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
+  ackPopupNotice,
   approveRecord,
   createAnnouncement,
   createBackup,
   createAppUser,
   createParticipant,
+  createPopupNotice,
   createRecord,
+  changeMyPassword,
   deleteRecord,
   downloadBackup,
   getAmountPresets,
@@ -37,8 +45,11 @@ import {
   getAppUsers,
   getBackups,
   getDeletedRecords,
+  getMe,
   getParticipants,
   getPinnedNotice,
+  getCurrentPopupNotice,
+  getPopupNotices,
   getRecord,
   getRecords,
   getRecordStats,
@@ -61,11 +72,15 @@ import {
   type Participant,
   type PersonalRecordStats,
   type PinnedNotice,
+  type PopupNotice,
+  type PopupNoticeCurrent,
+  type PopupNoticePayload,
   type RecordCreatePayload,
   type RecordDetail,
   type RecordListItem,
   type RecordStatsResponse,
   type StatsParticipant,
+  type StatsQuery,
   type StreakRecordStat,
   type SummaryStats,
   type TrendPoint,
@@ -74,13 +89,27 @@ import {
   restoreDeletedRecord,
   updateAnnouncement,
   updateAppUser,
+  updatePopupNotice,
+  updateMyAvatar,
   updateParticipantAvatar,
   updatePinnedNotice,
   updateRecord,
 } from './api'
 import './App.css'
 
-type ViewKey = 'dashboard' | 'entry' | 'records' | 'recordStats' | 'announcements' | 'review' | 'deleted' | 'users' | 'backup' | 'import'
+type ViewKey =
+  | 'dashboard'
+  | 'profile'
+  | 'entry'
+  | 'records'
+  | 'recordStats'
+  | 'announcements'
+  | 'popupNotices'
+  | 'review'
+  | 'deleted'
+  | 'users'
+  | 'backup'
+  | 'import'
 
 type SummaryItem = {
   label: string
@@ -97,6 +126,7 @@ type EntryClaim = {
 
 type AppUserDraft = {
   displayName: string
+  participantId: string
   role: AppUser['role']
   isActive: boolean
   password: string
@@ -107,8 +137,17 @@ type AuthSession = {
   token: string
 }
 
+type LayoutMode = 'auto' | 'mobile' | 'desktop'
+type StatsRangePreset = 'all' | 'day' | 'week' | 'month' | 'quarter' | 'custom'
+
+type TouchPoint = {
+  x: number
+  y: number
+}
+
 type AvatarCropState = {
-  participant: Participant
+  participant: Participant | StatsParticipant
+  mode: 'participant' | 'self'
   sourceUrl: string
   imageWidth: number
   imageHeight: number
@@ -124,10 +163,12 @@ type AvatarCropState = {
 
 const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '首页', icon: Home, key: 'dashboard' },
+  { label: '个人主页', icon: UserCircle, key: 'profile' },
   { label: '录入', icon: Plus, key: 'entry' },
   { label: '记录列表', icon: ListChecks, key: 'records' },
   { label: '记录统计', icon: Trophy, key: 'recordStats' },
   { label: '更新公告', icon: BookOpen, key: 'announcements' },
+  { label: '弹窗公告', icon: Bell, key: 'popupNotices' },
   { label: '审核队列', icon: LockKeyhole, key: 'review' },
   { label: '已删除记录', icon: RotateCcw, key: 'deleted' },
   { label: '用户管理', icon: Users, key: 'users' },
@@ -135,9 +176,10 @@ const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
   { label: '数据导入', icon: Database, key: 'import' },
 ]
 
-const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'entry', 'records', 'recordStats', 'announcements'])
+const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'profile', 'entry', 'records', 'recordStats', 'announcements'])
 const savedUserKey = 'red-packet-current-user'
 const senderDefaultsKey = 'red-packet-sender-default-amounts'
+const layoutModeKey = 'red-packet-layout-mode'
 const appEnvironmentLabel = import.meta.env.VITE_APP_ENV_LABEL ?? ''
 
 const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
@@ -258,6 +300,35 @@ function toDateTimeLocal(value: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
+function toDateInputValue(date: Date) {
+  const offset = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10)
+}
+
+function startOfDay(date: Date) {
+  const next = new Date(date)
+  next.setHours(0, 0, 0, 0)
+  return next
+}
+
+function endOfDay(date: Date) {
+  const next = new Date(date)
+  next.setHours(23, 59, 59, 999)
+  return next
+}
+
+function presetStartDate(preset: Exclude<StatsRangePreset, 'custom'>) {
+  const date = startOfDay(new Date())
+  if (preset === 'week') date.setDate(date.getDate() - 6)
+  if (preset === 'month') date.setMonth(date.getMonth() - 1)
+  if (preset === 'quarter') date.setMonth(date.getMonth() - 3)
+  return date
+}
+
+function isValidPasswordValue(password: string) {
+  return /^[A-Za-z0-9!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]{6,20}$/.test(password)
+}
+
 function makeClientId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
@@ -297,6 +368,11 @@ function readSenderDefaults() {
   }
 }
 
+function readLayoutMode(): LayoutMode {
+  const raw = window.localStorage.getItem(layoutModeKey)
+  return raw === 'mobile' || raw === 'desktop' || raw === 'auto' ? raw : 'auto'
+}
+
 function sumClaimAmounts(claims: EntryClaim[]) {
   return claims.reduce((total, claim) => total + toNumber(claim.amount), 0)
 }
@@ -324,6 +400,9 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
     color: chartColors[index % chartColors.length],
     values: values.map((item) => toNumber(item.pnl_amount)),
   }))
+  const finalValues = series
+    .map((item) => ({ ...item, finalValue: item.values[item.values.length - 1] ?? 0 }))
+    .sort((a, b) => b.finalValue - a.finalValue)
 
   const allValues = series.flatMap((item) => item.values)
   const minValue = Math.min(0, ...allValues)
@@ -331,7 +410,7 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
   const span = maxValue - minValue || 1
   const width = 720
   const height = 260
-  const padding = { top: 18, right: 20, bottom: 28, left: 52 }
+  const padding = { top: 18, right: 20, bottom: 28, left: 62 }
   const plotWidth = width - padding.left - padding.right
   const plotHeight = height - padding.top - padding.bottom
   const zeroY = padding.top + (maxValue / span) * plotHeight
@@ -345,7 +424,8 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div className="grid gap-3 xl:grid-cols-[1fr_180px]">
+      <div className="overflow-x-auto">
       <svg className="min-w-[720px]" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="累计盈亏趋势折线图">
         <rect x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} rx="8" fill="#f8fafc" />
         {[0, 1, 2, 3, 4].map((tick) => {
@@ -355,8 +435,8 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
           return (
             <g key={tick}>
               <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} stroke="#e2e8f0" />
-              <text x={padding.left - 10} y={y + 4} textAnchor="end" className="fill-slate-400 text-[11px]">
-                {value.toFixed(0)}
+              <text x={padding.left - 10} y={y + 4} textAnchor="end" className="fill-slate-600 text-[11px] font-medium">
+                ¥{value.toFixed(0)}
               </text>
             </g>
           )
@@ -373,14 +453,28 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
 
           return (
             <g key={item.participantId}>
-              <path d={path} fill="none" stroke={item.color} strokeWidth="2.5" />
+              <path d={path} fill="none" stroke={item.color} strokeWidth="1.6" />
               {points.slice(-1).map((point) => (
-                <circle key={`${item.participantId}-${point.x}`} cx={point.x} cy={point.y} r="4" fill={item.color} />
+                <circle key={`${item.participantId}-${point.x}`} cx={point.x} cy={point.y} r="2.8" fill={item.color} />
               ))}
             </g>
           )
         })}
       </svg>
+      </div>
+      <div className="grid grid-cols-2 gap-1 text-xs sm:grid-cols-3 xl:block xl:space-y-2">
+        {finalValues.map((item) => (
+          <div key={item.participantId} className="flex items-center justify-between gap-2 rounded-md bg-slate-50 px-2 py-1 xl:bg-white xl:px-0">
+            <span className="min-w-0 truncate">
+              <span className="mr-1.5 inline-block size-2 rounded-full" style={{ backgroundColor: item.color }} />
+              {item.name}
+            </span>
+            <span className={`shrink-0 font-semibold ${item.finalValue >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
+              {formatMoney(item.finalValue.toFixed(2))}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -388,12 +482,26 @@ function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selecte
 function App() {
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => readSavedSession())
   const [activeView, setActiveView] = useState<ViewKey>('dashboard')
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => readLayoutMode())
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [touchStart, setTouchStart] = useState<TouchPoint | null>(null)
+  const [statsRangePreset, setStatsRangePreset] = useState<StatsRangePreset>('all')
+  const [statsDateFrom, setStatsDateFrom] = useState('')
+  const [statsDateTo, setStatsDateTo] = useState(() => toDateInputValue(new Date()))
   const [summary, setSummary] = useState<SummaryStats>(fallbackSummary)
   const [pinnedNotice, setPinnedNotice] = useState<PinnedNotice>(fallbackPinnedNotice)
   const [pinnedNoticeDraft, setPinnedNoticeDraft] = useState('')
   const [pinnedNoticeMessage, setPinnedNoticeMessage] = useState<string | null>(null)
   const [pinnedNoticeError, setPinnedNoticeError] = useState<string | null>(null)
   const [savingPinnedNotice, setSavingPinnedNotice] = useState(false)
+  const [currentPopupNotice, setCurrentPopupNotice] = useState<PopupNoticeCurrent>(null)
+  const [popupNoticeDismiss, setPopupNoticeDismiss] = useState(false)
+  const [popupNotices, setPopupNotices] = useState<PopupNotice[]>([])
+  const [popupNoticeDraft, setPopupNoticeDraft] = useState<PopupNoticePayload>({ title: '小公告', content: '', recipient_user_ids: [], is_active: true })
+  const [editingPopupNoticeId, setEditingPopupNoticeId] = useState<number | null>(null)
+  const [popupNoticeMessage, setPopupNoticeMessage] = useState<string | null>(null)
+  const [popupNoticeError, setPopupNoticeError] = useState<string | null>(null)
+  const [savingPopupNotice, setSavingPopupNotice] = useState(false)
   const [records, setRecords] = useState<RecordListItem[]>([])
   const [recordTotal, setRecordTotal] = useState(0)
   const [recordLimit, setRecordLimit] = useState(30)
@@ -427,6 +535,7 @@ function App() {
     username: '',
     display_name: '',
     password: '',
+    participant_id: null,
     role: 'viewer',
     is_active: true,
   })
@@ -436,10 +545,15 @@ function App() {
   const [amountPresets, setAmountPresets] = useState<AmountPreset[]>([])
   const [senderDefaultAmounts, setSenderDefaultAmounts] = useState<Record<string, string>>(() => readSenderDefaults())
   const [selectedTrendUserIds, setSelectedTrendUserIds] = useState<Set<number>>(new Set())
+  const [trendSelectorOpen, setTrendSelectorOpen] = useState(false)
   const [selectedStatsUserId, setSelectedStatsUserId] = useState('')
   const [selectedRecordStatsUserId, setSelectedRecordStatsUserId] = useState('')
   const [savingAvatarParticipantId, setSavingAvatarParticipantId] = useState<number | null>(null)
   const [avatarCrop, setAvatarCrop] = useState<AvatarCropState | null>(null)
+  const [profilePasswordDraft, setProfilePasswordDraft] = useState({ oldPassword: '', newPassword: '', confirmPassword: '' })
+  const [profileMessage, setProfileMessage] = useState<string | null>(null)
+  const [profileError, setProfileError] = useState<string | null>(null)
+  const [savingProfilePassword, setSavingProfilePassword] = useState(false)
   const [entryTime, setEntryTime] = useState(currentDateTimeLocal())
   const [senderId, setSenderId] = useState('')
   const [totalAmount, setTotalAmount] = useState('10')
@@ -480,8 +594,23 @@ function App() {
   const [apiError, setApiError] = useState<string | null>(null)
 
   const currentUser = authSession?.user ?? null
+  const currentUserId = currentUser?.id
+  const authTokenValue = authSession?.token
   const currentRole = currentUser?.role ?? 'viewer'
   const isAdmin = currentRole === 'admin'
+  const forceMobileShell = layoutMode === 'mobile'
+  const forceDesktopShell = layoutMode === 'desktop'
+  const visibleNavItems = useMemo(
+    () => navItems.filter((item) => isAdmin || viewerVisibleViews.has(item.key)),
+    [isAdmin],
+  )
+  const statsQuery = useMemo<StatsQuery>(() => {
+    if (statsRangePreset === 'all') return {}
+    return {
+      dateFrom: statsDateFrom ? startOfDay(new Date(statsDateFrom)).toISOString() : undefined,
+      dateTo: statsDateTo ? endOfDay(new Date(statsDateTo)).toISOString() : undefined,
+    }
+  }, [statsDateFrom, statsDateTo, statsRangePreset])
 
   const loadDashboardData = useCallback(async () => {
     const [
@@ -499,21 +628,27 @@ function App() {
       participantData,
       presetData,
       appUserData,
+      currentUserData,
+      currentPopupNoticeData,
+      popupNoticeData,
     ] = await Promise.all([
-      getSummaryStats(),
+      getSummaryStats(statsQuery),
       getPinnedNotice(),
       getRecentRecords(30),
       isAdmin ? getRecords({ status: 'pending', limit: 100 }) : Promise.resolve({ items: [], total: 0 }),
       isAdmin ? getDeletedRecords({ limit: 50 }) : Promise.resolve({ items: [], total: 0 }),
       isAdmin ? getBackups() : Promise.resolve([]),
       getMyRecords({ limit: 10 }),
-      getUserStats(),
-      getRecordStats(),
+      getUserStats(statsQuery),
+      getRecordStats(statsQuery),
       getAnnouncements(),
-      getTrendPoints(),
+      getTrendPoints(statsQuery),
       getParticipants(),
       getAmountPresets(),
       isAdmin ? getAppUsers() : Promise.resolve([]),
+      getMe(),
+      getCurrentPopupNotice(),
+      isAdmin ? getPopupNotices() : Promise.resolve([]),
     ])
 
     setSummary(summaryData)
@@ -535,12 +670,21 @@ function App() {
     setParticipants(participantData)
     setAmountPresets(presetData)
     setAppUsers(appUserData)
+    setCurrentPopupNotice(currentPopupNoticeData)
+    setPopupNoticeDismiss(false)
+    setPopupNotices(popupNoticeData)
+    if (authTokenValue) {
+      const nextSession = { user: currentUserData, token: authTokenValue }
+      window.localStorage.setItem(savedUserKey, JSON.stringify(nextSession))
+      setAuthSession(nextSession)
+    }
     setAppUserDrafts(
       Object.fromEntries(
         appUserData.map((user) => [
           user.id,
           {
             displayName: user.display_name,
+            participantId: user.participant_id ? String(user.participant_id) : '',
             role: user.role,
             isActive: user.is_active,
             password: '',
@@ -550,7 +694,7 @@ function App() {
     )
     setSelectedTrendUserIds((current) => (current.size ? current : new Set(userStatsData.map((item) => item.participant_id))))
     setSenderId((current) => current || String(participantData[0]?.id ?? ''))
-  }, [isAdmin])
+  }, [authTokenValue, isAdmin, statsQuery])
 
   async function loadRecordList() {
     const data = await getRecords({
@@ -564,6 +708,69 @@ function App() {
     })
     setRecords(data.items)
     setRecordTotal(data.total)
+  }
+
+  function changeStatsPreset(preset: StatsRangePreset) {
+    setStatsRangePreset(preset)
+    if (preset === 'all') {
+      setStatsDateFrom('')
+      setStatsDateTo(toDateInputValue(new Date()))
+    } else if (preset !== 'custom') {
+      setStatsDateFrom(toDateInputValue(presetStartDate(preset)))
+      setStatsDateTo(toDateInputValue(new Date()))
+    }
+  }
+
+  function renderStatsRangeControls() {
+    const options: Array<{ label: string; value: StatsRangePreset }> = [
+      { label: '总和', value: 'all' },
+      { label: '一天', value: 'day' },
+      { label: '一周', value: 'week' },
+      { label: '一月', value: 'month' },
+      { label: '三月', value: 'quarter' },
+      { label: '自定义', value: 'custom' },
+    ]
+
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold">统计时间范围</h2>
+            <p className="mt-0.5 text-xs text-slate-500">首页、趋势、记录统计和个人概览共用这个时间范围。</p>
+          </div>
+          <div className="grid grid-cols-5 gap-1 rounded-lg bg-slate-100 p-1 text-xs sm:flex sm:text-sm">
+            {options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`rounded-md px-2 py-1.5 font-medium ${
+                  statsRangePreset === option.value ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-900'
+                }`}
+                onClick={() => changeStatsPreset(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {statsRangePreset === 'custom' ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <input
+              className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              type="date"
+              value={statsDateFrom}
+              onChange={(event) => setStatsDateFrom(event.target.value)}
+            />
+            <input
+              className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              type="date"
+              value={statsDateTo}
+              onChange={(event) => setStatsDateTo(event.target.value)}
+            />
+          </div>
+        ) : null}
+      </section>
+    )
   }
 
   async function loadPendingRecords() {
@@ -662,6 +869,10 @@ function App() {
       setUserManageError('新增账号需要填写用户名、显示名称和初始密码。')
       return
     }
+    if (!isValidPasswordValue(newAppUser.password)) {
+      setUserManageError('密码需为 6-20 位，只支持半角英文字母、数字和常见符号。')
+      return
+    }
 
     try {
       setSavingAppUserId('new')
@@ -670,7 +881,7 @@ function App() {
         username: newAppUser.username.trim(),
         display_name: newAppUser.display_name.trim(),
       })
-      setNewAppUser({ username: '', display_name: '', password: '', role: 'viewer', is_active: true })
+      setNewAppUser({ username: '', display_name: '', password: '', participant_id: null, role: 'viewer', is_active: true })
       setUserManageMessage('登录账号已新增。')
       await loadDashboardData()
     } catch {
@@ -693,10 +904,15 @@ function App() {
 
     const payload: AppUserUpdatePayload = {
       display_name: draft.displayName.trim(),
+      participant_id: draft.participantId ? Number(draft.participantId) : null,
       role: draft.role,
       is_active: draft.isActive,
     }
     if (draft.password) {
+      if (!isValidPasswordValue(draft.password)) {
+        setUserManageError('密码需为 6-20 位，只支持半角英文字母、数字和常见符号。')
+        return
+      }
       payload.password = draft.password
     }
 
@@ -708,6 +924,7 @@ function App() {
         ...current,
         [updated.id]: {
           displayName: updated.display_name,
+          participantId: updated.participant_id ? String(updated.participant_id) : '',
           role: updated.role,
           isActive: updated.is_active,
           password: '',
@@ -756,6 +973,7 @@ function App() {
       const sourceUrl = await readImageFile(file)
       setAvatarCrop({
         participant,
+        mode: 'participant',
         sourceUrl,
         imageWidth: 0,
         imageHeight: 0,
@@ -770,6 +988,37 @@ function App() {
       })
     } catch {
       setParticipantError('读取图片失败，请确认选择的是图片文件。')
+    }
+  }
+
+  async function handleSelfAvatarFile(file: File | undefined) {
+    if (!file || !currentUser?.participant_id || !currentUser.participant_name) return
+    setProfileMessage(null)
+    setProfileError(null)
+
+    try {
+      const sourceUrl = await readImageFile(file)
+      setAvatarCrop({
+        participant: {
+          id: currentUser.participant_id,
+          name: currentUser.participant_name,
+          avatar_data_url: currentUser.avatar_data_url,
+        },
+        mode: 'self',
+        sourceUrl,
+        imageWidth: 0,
+        imageHeight: 0,
+        scale: 1,
+        offsetX: 0,
+        offsetY: 0,
+        dragging: false,
+        dragStartX: 0,
+        dragStartY: 0,
+        dragOriginX: 0,
+        dragOriginY: 0,
+      })
+    } catch {
+      setProfileError('读取图片失败，请确认选择的是图片文件。')
     }
   }
 
@@ -836,13 +1085,25 @@ function App() {
 
       context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, avatarOutputSize, avatarOutputSize)
       const avatarDataUrl = canvas.toDataURL('image/jpeg', 0.88)
-      const updated = await updateParticipantAvatar(avatarCrop.participant.id, avatarDataUrl)
-      setParticipants((current) => current.map((item) => (item.id === updated.id ? updated : item)))
-      setParticipantMessage(`${avatarCrop.participant.name} 的头像已更新。`)
+      if (avatarCrop.mode === 'self') {
+        const updatedUser = await updateMyAvatar(avatarDataUrl)
+        const nextSession = { user: updatedUser, token: authSession?.token ?? '' }
+        window.localStorage.setItem(savedUserKey, JSON.stringify(nextSession))
+        setAuthSession(nextSession)
+        setProfileMessage('头像已更新。')
+      } else {
+        const updated = await updateParticipantAvatar(avatarCrop.participant.id, avatarDataUrl)
+        setParticipants((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+        setParticipantMessage(`${avatarCrop.participant.name} 的头像已更新。`)
+      }
       setAvatarCrop(null)
       await loadDashboardData()
     } catch {
-      setParticipantError('头像保存失败，请重新选择图片。')
+      if (avatarCrop.mode === 'self') {
+        setProfileError('头像保存失败，请重新选择图片。')
+      } else {
+        setParticipantError('头像保存失败，请重新选择图片。')
+      }
     } finally {
       setSavingAvatarParticipantId(null)
     }
@@ -862,6 +1123,39 @@ function App() {
       setParticipantError('清空头像失败，请稍后重试。')
     } finally {
       setSavingAvatarParticipantId(null)
+    }
+  }
+
+  async function saveProfilePassword() {
+    setProfileMessage(null)
+    setProfileError(null)
+    if (!profilePasswordDraft.oldPassword || !profilePasswordDraft.newPassword || !profilePasswordDraft.confirmPassword) {
+      setProfileError('请填写旧密码、新密码和确认密码。')
+      return
+    }
+    if (profilePasswordDraft.newPassword !== profilePasswordDraft.confirmPassword) {
+      setProfileError('两次输入的新密码不一致。')
+      return
+    }
+    if (!isValidPasswordValue(profilePasswordDraft.newPassword)) {
+      setProfileError('新密码需为 6-20 位，只支持半角英文字母、数字和常见符号。')
+      return
+    }
+
+    try {
+      setSavingProfilePassword(true)
+      const updatedUser = await changeMyPassword(profilePasswordDraft.oldPassword, profilePasswordDraft.newPassword)
+      if (authSession?.token) {
+        const nextSession = { user: updatedUser, token: authSession.token }
+        window.localStorage.setItem(savedUserKey, JSON.stringify(nextSession))
+        setAuthSession(nextSession)
+      }
+      setProfilePasswordDraft({ oldPassword: '', newPassword: '', confirmPassword: '' })
+      setProfileMessage('密码已更新。')
+    } catch {
+      setProfileError('密码修改失败，请确认旧密码正确，且新密码符合规则。')
+    } finally {
+      setSavingProfilePassword(false)
     }
   }
 
@@ -945,11 +1239,90 @@ function App() {
     }
   }
 
+  function resetPopupNoticeDraft() {
+    setPopupNoticeDraft({ title: '小公告', content: '', recipient_user_ids: [], is_active: true })
+    setEditingPopupNoticeId(null)
+    setPopupNoticeError(null)
+    setPopupNoticeMessage(null)
+  }
+
+  function editPopupNotice(notice: PopupNotice) {
+    setPopupNoticeDraft({
+      title: notice.title,
+      content: notice.content,
+      recipient_user_ids: notice.recipients.map((recipient) => recipient.user_id),
+      is_active: notice.is_active,
+    })
+    setEditingPopupNoticeId(notice.id)
+    setPopupNoticeError(null)
+    setPopupNoticeMessage(null)
+  }
+
+  function togglePopupNoticeRecipient(userId: number) {
+    setPopupNoticeDraft((current) => {
+      const exists = current.recipient_user_ids.includes(userId)
+      return {
+        ...current,
+        recipient_user_ids: exists
+          ? current.recipient_user_ids.filter((id) => id !== userId)
+          : [...current.recipient_user_ids, userId],
+      }
+    })
+  }
+
+  async function savePopupNotice() {
+    setPopupNoticeError(null)
+    setPopupNoticeMessage(null)
+    if (!popupNoticeDraft.content.trim()) {
+      setPopupNoticeError('请输入弹窗内容。')
+      return
+    }
+    if (!popupNoticeDraft.title.trim()) {
+      setPopupNoticeError('请输入弹窗标题。')
+      return
+    }
+    if (popupNoticeDraft.recipient_user_ids.length === 0) {
+      setPopupNoticeError('请至少选择一个接收用户。')
+      return
+    }
+
+    try {
+      setSavingPopupNotice(true)
+      const payload = { ...popupNoticeDraft, title: popupNoticeDraft.title.trim(), content: popupNoticeDraft.content.trim() }
+      if (editingPopupNoticeId) {
+        await updatePopupNotice(editingPopupNoticeId, payload)
+        setPopupNoticeMessage('弹窗公告已更新。')
+      } else {
+        await createPopupNotice(payload)
+        setPopupNoticeMessage('弹窗公告已发布。')
+      }
+      resetPopupNoticeDraft()
+      const notices = await getPopupNotices()
+      setPopupNotices(notices)
+    } catch {
+      setPopupNoticeError('保存弹窗公告失败，请确认接收用户有效。')
+    } finally {
+      setSavingPopupNotice(false)
+    }
+  }
+
+  async function closeCurrentPopupNotice() {
+    if (!currentPopupNotice) return
+    try {
+      await ackPopupNotice(currentPopupNotice.id, popupNoticeDismiss)
+      setCurrentPopupNotice(null)
+      setPopupNoticeDismiss(false)
+    } catch {
+      setCurrentPopupNotice(null)
+      setPopupNoticeDismiss(false)
+    }
+  }
+
   useEffect(() => {
     let active = true
 
     async function load() {
-      if (!currentUser) {
+      if (!currentUserId) {
         setLoading(false)
         return
       }
@@ -976,7 +1349,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [currentUser, loadDashboardData])
+  }, [currentUserId, loadDashboardData])
 
   useEffect(() => {
     function handleAuthExpired() {
@@ -1025,6 +1398,9 @@ function App() {
   const selectedRecordStatsUser = selectedRecordStatsUserId
     ? recordStats.personal.find((item) => String(item.participant.id) === selectedRecordStatsUserId)
     : undefined
+  const currentRecordStatsUser = currentUser?.participant_id
+    ? recordStats.personal.find((item) => item.participant.id === currentUser.participant_id)
+    : undefined
   const maxAbsPnl = Math.max(1, ...userStats.map((item) => Math.abs(toNumber(item.pnl_amount))))
   const claimTotal = sumClaimAmounts(entryClaims)
   const amountMismatch = Math.abs(claimTotal - toNumber(totalAmount)) > 0.001
@@ -1068,49 +1444,49 @@ function App() {
     const maxMetric = Math.max(1, ...metrics.map((item) => Number(item.raw ?? item.value) || 0))
 
     return (
-      <div className="border-b border-slate-100 p-5">
-        <div className="mb-5 flex items-center gap-4">
-          <AvatarBubble participant={participant} size="xl" />
+      <div className="border-b border-slate-100 p-3 sm:p-5">
+        <div className="mb-3 flex items-center gap-3 sm:mb-5 sm:gap-4">
+          <AvatarBubble participant={participant} size="lg" />
           <div>
-            <h3 className="text-lg font-semibold">{user.name}</h3>
-            <p className="mt-1 text-sm text-slate-500">个人累计统计与排名</p>
+            <h3 className="text-base font-semibold sm:text-lg">{user.name}</h3>
+            <p className="mt-0.5 text-xs text-slate-500 sm:mt-1 sm:text-sm">个人累计统计与排名</p>
           </div>
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-1.5 md:grid-cols-2 md:gap-3 xl:grid-cols-4">
           {[
             { label: '发包金额', value: formatMoney(user.send_amount), rank: getUserRank(user, 'send_amount') },
             { label: '抢包金额', value: formatMoney(user.receive_amount), rank: getUserRank(user, 'receive_amount') },
             { label: '盈亏', value: formatMoney(user.pnl_amount), rank: getUserRank(user, 'pnl_amount') },
             { label: '平均每包', value: formatMoney(user.average_receive_amount), rank: getUserRank(user, 'average_receive_amount') },
           ].map((item) => (
-            <div key={item.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">{item.label}</p>
-              <p className="mt-2 text-2xl font-semibold">{item.value}</p>
-              <p className="mt-2 text-xs text-slate-500">{item.rank}</p>
+            <div key={item.label} className="rounded-lg border border-slate-200 bg-slate-50 p-2 sm:p-4">
+              <p className="text-xs text-slate-500 sm:text-sm">{item.label}</p>
+              <p className="mt-1 truncate text-lg font-semibold sm:mt-2 sm:text-2xl">{item.value}</p>
+              <p className="mt-0.5 text-[11px] text-slate-500 sm:mt-2 sm:text-xs">{item.rank}</p>
             </div>
           ))}
         </div>
 
-        <div className="mt-5 rounded-lg border border-slate-200 p-4">
+        <div className="mt-2.5 rounded-lg border border-slate-200 p-2.5 sm:mt-5 sm:p-4">
           <h3 className="text-sm font-semibold">个人详细指标</h3>
-          <div className="mt-4 space-y-4">
+          <div className="mt-3 space-y-1.5 sm:mt-4 sm:space-y-4">
             {metrics.map((item) => {
               const width = `${Math.max(3, ((Number(item.raw ?? item.value) || 0) / maxMetric) * 100)}%`
 
               return (
-                <div key={item.label} className="grid gap-2 md:grid-cols-[92px_1fr_180px] md:items-center">
-                  <span className="text-sm text-slate-600">{item.label}</span>
-                  <div className="h-7 rounded-lg bg-slate-100 p-1">
+                <div key={item.label} className="grid grid-cols-[58px_1fr_104px] items-center gap-1.5 md:grid-cols-[92px_1fr_180px] md:gap-2">
+                  <span className="text-[11px] text-slate-600 sm:text-sm">{item.label}</span>
+                  <div className="h-4 rounded-lg bg-slate-100 p-0.5 sm:h-7 sm:p-1">
                     <div className={`h-full rounded-md ${item.color}`} style={{ width }} />
                   </div>
-                  <span className="text-sm text-slate-600 md:text-right">
+                  <span className="text-right text-[11px] leading-4 text-slate-600 sm:text-sm">
                     {item.value} <span className="text-slate-400">{item.rank}</span>
                   </span>
                 </div>
               )
             })}
           </div>
-          <p className="mt-5 text-sm text-slate-500">
+          <p className="mt-3 text-xs text-slate-500 sm:mt-5 sm:text-sm">
             对局发包率：{user.send_ratio}（{getUserRank(user, 'send_ratio_number')}）
           </p>
         </div>
@@ -1223,20 +1599,20 @@ function App() {
     ]
 
     return (
-      <div className="border-t border-slate-100 p-5">
-        <div className="flex items-center gap-4">
-          <AvatarBubble participant={item.participant} size="xl" />
+      <div className="border-t border-slate-100 p-3 sm:p-5">
+        <div className="flex items-center gap-3 sm:gap-4">
+          <AvatarBubble participant={item.participant} size="lg" />
           <div>
-            <h3 className="text-lg font-semibold">{item.participant.name}</h3>
-            <p className="mt-1 text-sm text-slate-500">个人记录峰值与主要往来对象</p>
+            <h3 className="text-base font-semibold sm:text-lg">{item.participant.name}</h3>
+            <p className="mt-0.5 text-xs text-slate-500 sm:mt-1 sm:text-sm">个人记录峰值与主要往来对象</p>
           </div>
         </div>
-        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-2 md:gap-3 xl:grid-cols-4">
           {cards.map((card) => (
-            <div key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">{card.label}</p>
-              <p className="mt-2 text-2xl font-semibold">{card.value}</p>
-              <p className="mt-2 text-sm text-slate-500">{card.detail}</p>
+            <div key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-4">
+              <p className="text-xs text-slate-500 sm:text-sm">{card.label}</p>
+              <p className="mt-1 truncate text-lg font-semibold sm:mt-2 sm:text-2xl">{card.value}</p>
+              <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500 sm:mt-2 sm:text-sm">{card.detail}</p>
             </div>
           ))}
         </div>
@@ -1246,7 +1622,8 @@ function App() {
 
   function renderRecordStats() {
     return (
-      <>
+      <div className="space-y-5">
+        {renderStatsRangeControls()}
         <section className="grid gap-5 xl:grid-cols-4">
           {renderTopClaimCard('最大红包', recordStats.max_claims, 'best')}
           {renderTopClaimCard('最大倒霉蛋', recordStats.min_claims, 'low')}
@@ -1255,24 +1632,32 @@ function App() {
         </section>
 
         <section className="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-100 px-5 py-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="border-b border-slate-100 px-3 py-3 sm:px-5 sm:py-4">
+            <div className="space-y-3">
               <div>
                 <h2 className="text-base font-semibold">个人记录概览</h2>
-                <p className="mt-1 text-sm text-slate-500">选择一个用户查看个人最大/最小红包、连胜连败和往来金额。</p>
+                <p className="mt-0.5 text-xs text-slate-500 sm:mt-1 sm:text-sm">选择一个用户查看个人最大/最小红包、连胜连败和往来金额。</p>
               </div>
-              <select
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                value={selectedRecordStatsUserId}
-                onChange={(event) => setSelectedRecordStatsUserId(event.target.value)}
-              >
-                <option value="">请选择一个用户</option>
-                {recordStats.personal.map((item) => (
-                  <option key={item.participant.id} value={item.participant.id}>
-                    {item.participant.name}
-                  </option>
-                ))}
-              </select>
+              <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4 lg:grid-cols-6">
+                {recordStats.personal.map((item) => {
+                  const selected = selectedRecordStatsUserId === String(item.participant.id)
+
+                  return (
+                    <button
+                      key={item.participant.id}
+                      type="button"
+                      className={`min-w-0 rounded-lg border px-2 py-2 text-sm font-medium transition ${
+                        selected
+                          ? 'border-red-200 bg-red-50 text-red-700'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-red-100 hover:bg-red-50/60 hover:text-red-700'
+                      }`}
+                      onClick={() => setSelectedRecordStatsUserId(String(item.participant.id))}
+                    >
+                      <span className="block truncate">{item.participant.name}</span>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           </div>
           {selectedRecordStatsUser ? (
@@ -1281,7 +1666,100 @@ function App() {
             <div className="p-10 text-center text-sm text-slate-500">请选择一个用户。</div>
           )}
         </section>
-      </>
+      </div>
+    )
+  }
+
+  function renderProfile() {
+    const profileParticipant =
+      currentUser?.participant_id && currentUser.participant_name
+        ? {
+            id: currentUser.participant_id,
+            name: currentUser.participant_name,
+            avatar_data_url: currentUser.avatar_data_url,
+          }
+        : null
+
+    return (
+      <div className="space-y-5">
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">账号管理</h2>
+            <p className="mt-1 text-sm text-slate-500">管理自己的头像和登录密码。</p>
+          </div>
+          <div className="grid gap-5 p-4 lg:grid-cols-[280px_1fr] lg:p-5">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-center gap-4">
+                {profileParticipant ? <AvatarBubble participant={profileParticipant} size="xl" /> : <div className="flex size-20 items-center justify-center rounded-lg bg-slate-200 text-slate-500">?</div>}
+                <div className="min-w-0">
+                  <p className="truncate text-lg font-semibold">{currentUser?.display_name}</p>
+                  <p className="mt-1 text-sm text-slate-500">{currentUser?.username}</p>
+                  <p className="mt-1 text-xs text-slate-500">{profileParticipant ? `绑定参与者：${profileParticipant.name}` : '当前账号未绑定参与者'}</p>
+                </div>
+              </div>
+              <label className="mt-4 inline-flex cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                上传头像
+                <input className="hidden" type="file" accept="image/*" onChange={(event) => handleSelfAvatarFile(event.target.files?.[0])} disabled={!profileParticipant} />
+              </label>
+              {!profileParticipant ? <p className="mt-3 text-xs text-amber-700">需要管理员先把网页登录账号绑定到发包抢包用户，才能上传头像和查看个人统计。</p> : null}
+            </div>
+
+            <div className="space-y-3">
+              {profileMessage ? <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{profileMessage}</div> : null}
+              {profileError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{profileError}</div> : null}
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-slate-500">旧密码</span>
+                  <input
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                    type="password"
+                    value={profilePasswordDraft.oldPassword}
+                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, oldPassword: event.target.value }))}
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-slate-500">新密码</span>
+                  <input
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                    type="password"
+                    value={profilePasswordDraft.newPassword}
+                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, newPassword: event.target.value }))}
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-slate-500">确认新密码</span>
+                  <input
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                    type="password"
+                    value={profilePasswordDraft.confirmPassword}
+                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, confirmPassword: event.target.value }))}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-slate-500">密码长度 6-20 位，仅支持半角英文字母、数字和常见符号，不支持中文或空格。</p>
+                <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveProfilePassword} disabled={savingProfilePassword}>
+                  {savingProfilePassword ? '保存中' : '修改密码'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {renderStatsRangeControls()}
+
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">个人记录概览</h2>
+            <p className="mt-1 text-sm text-slate-500">当前时间范围内的个人最大/最小红包、连胜连败和往来金额。</p>
+          </div>
+          {currentRecordStatsUser ? (
+            renderRecordStatsPersonal(currentRecordStatsUser)
+          ) : (
+            <div className="p-10 text-center text-sm text-slate-500">{profileParticipant ? '当前时间范围内暂无个人记录。' : '当前账号尚未绑定参与者。'}</div>
+          )}
+        </section>
+      </div>
     )
   }
 
@@ -1388,6 +1866,152 @@ function App() {
                         {announcement.content}
                       </div>
                     ) : null}
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+    )
+  }
+
+  function renderPopupNotices() {
+    if (!isAdmin) {
+      return renderPlaceholder('弹窗公告', '该页面仅管理员可见。')
+    }
+
+    const selectedRecipientIds = new Set(popupNoticeDraft.recipient_user_ids)
+
+    return (
+      <div className="space-y-5">
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">{editingPopupNoticeId ? '编辑弹窗公告' : '发布弹窗公告'}</h2>
+            <p className="mt-1 text-sm text-slate-500">用户登录后会看到最新一条未忽略的弹窗公告。</p>
+          </div>
+          <div className="space-y-4 p-5">
+            <label className="block space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">弹窗标题</span>
+              <input
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={popupNoticeDraft.title}
+                maxLength={120}
+                onChange={(event) => setPopupNoticeDraft((current) => ({ ...current, title: event.target.value }))}
+                placeholder="例如：小公告"
+              />
+            </label>
+            <label className="block space-y-1.5">
+              <span className="text-xs font-medium text-slate-500">弹窗内容</span>
+              <textarea
+                className="min-h-32 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={popupNoticeDraft.content}
+                maxLength={2000}
+                onChange={(event) => setPopupNoticeDraft((current) => ({ ...current, content: event.target.value }))}
+                placeholder="写一段给用户看的弹窗内容。"
+              />
+            </label>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm font-medium text-slate-700">接收用户</p>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="xs" onClick={() => setPopupNoticeDraft((current) => ({ ...current, recipient_user_ids: [] }))}>
+                    全不选
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => setPopupNoticeDraft((current) => ({ ...current, recipient_user_ids: appUsers.map((user) => user.id) }))}
+                  >
+                    全选
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                {appUsers.map((user) => {
+                  const selected = selectedRecipientIds.has(user.id)
+
+                  return (
+                    <button
+                      key={user.id}
+                      type="button"
+                      className={`min-w-0 rounded-lg border px-3 py-2 text-left text-sm ${
+                        selected
+                          ? 'border-red-200 bg-red-50 text-red-700'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-red-100 hover:bg-red-50/60 hover:text-red-700'
+                      }`}
+                      onClick={() => togglePopupNoticeRecipient(user.id)}
+                    >
+                      <span className="block truncate font-medium">{user.display_name}</span>
+                      <span className="mt-0.5 block truncate text-xs opacity-70">{user.username}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={popupNoticeDraft.is_active}
+                onChange={(event) => setPopupNoticeDraft((current) => ({ ...current, is_active: event.target.checked }))}
+              />
+              启用这条弹窗
+            </label>
+
+            {popupNoticeError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{popupNoticeError}</div> : null}
+            {popupNoticeMessage ? <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{popupNoticeMessage}</div> : null}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              {editingPopupNoticeId ? (
+                <Button variant="outline" onClick={resetPopupNoticeDraft} disabled={savingPopupNotice}>
+                  取消编辑
+                </Button>
+              ) : null}
+              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={savePopupNotice} disabled={savingPopupNotice}>
+                {savingPopupNotice ? '保存中' : editingPopupNoticeId ? '保存弹窗' : '发布弹窗'}
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">弹窗公告记录</h2>
+            <p className="mt-1 text-sm text-slate-500">只会向用户展示最新一条仍启用且未被忽略的弹窗。</p>
+          </div>
+          {popupNotices.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-500">暂无弹窗公告。</div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {popupNotices.map((notice) => {
+                const seenCount = notice.recipients.filter((recipient) => recipient.seen_at).length
+                const dismissedCount = notice.recipients.filter((recipient) => recipient.dismissed_at).length
+
+                return (
+                  <article key={notice.id} className="px-5 py-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-md px-2 py-1 text-xs font-medium ${notice.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                            {notice.is_active ? '启用' : '停用'}
+                          </span>
+                          <span className="font-semibold text-slate-900">{notice.title}</span>
+                          <span className="text-xs text-slate-500">创建：{formatTime(notice.created_at)}</span>
+                        </div>
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{notice.content}</p>
+                        <p className="mt-2 text-xs text-slate-500">
+                          接收 {notice.recipients.length} 人，已看 {seenCount} 人，不再提醒 {dismissedCount} 人
+                        </p>
+                        <p className="mt-2 text-xs leading-5 text-slate-500">
+                          {notice.recipients.map((recipient) => recipient.display_name).join('、')}
+                        </p>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={() => editPopupNotice(notice)}>
+                        编辑
+                      </Button>
+                    </div>
                   </article>
                 )
               })}
@@ -1573,6 +2197,12 @@ function App() {
   async function openRecord(recordId: number) {
     setRecordMessage(null)
     setRecordError(null)
+    if (selectedRecord?.id === recordId) {
+      setSelectedRecord(null)
+      setRecordEditMode(false)
+      return
+    }
+
     try {
       const record = await getRecord(recordId)
       setSelectedRecord(record)
@@ -1714,22 +2344,22 @@ function App() {
 
   function renderSummaryCards() {
     return (
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-4">
         {summaryItems.map((item) => {
           const Icon = item.icon
 
           return (
-            <article key={item.label} className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-slate-500">{item.label}</p>
-                  <p className="mt-4 text-3xl font-semibold">{item.value}</p>
+            <article key={item.label} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-6">
+              <div className="flex items-start justify-between gap-2 sm:gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-slate-500 sm:text-sm">{item.label}</p>
+                  <p className="mt-2 truncate text-xl font-semibold sm:mt-4 sm:text-3xl">{item.value}</p>
                 </div>
-                <div className="flex size-12 items-center justify-center rounded-lg bg-red-50 text-red-700">
-                  <Icon className="size-6" />
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-700 sm:size-12">
+                  <Icon className="size-4 sm:size-6" />
                 </div>
               </div>
-              <p className="mt-5 text-sm text-slate-500">{item.helper}</p>
+              <p className="mt-3 line-clamp-2 text-xs leading-5 text-slate-500 sm:mt-5 sm:text-sm">{item.helper}</p>
             </article>
           )
         })}
@@ -1776,37 +2406,73 @@ function App() {
     )
   }
 
+  function renderPopupNoticeModal() {
+    if (!currentPopupNotice) return null
+
+    return (
+      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 px-4">
+        <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white shadow-2xl">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="text-base font-semibold">{currentPopupNotice.title}</h2>
+          </div>
+          <div className="space-y-4 p-5">
+            <div className="max-h-[42vh] overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-sm leading-6 text-slate-700">
+              {currentPopupNotice.content}
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={popupNoticeDismiss}
+                onChange={(event) => setPopupNoticeDismiss(event.target.checked)}
+              />
+              下次不再提醒这一条
+            </label>
+            <div className="flex justify-end">
+              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={closeCurrentPopupNotice}>
+                知道了
+              </Button>
+            </div>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   function renderDashboard() {
     return (
       <>
         {renderPinnedNotice()}
+        <div className="mb-5">{renderStatsRangeControls()}</div>
         {renderSummaryCards()}
 
-        <section className="mt-5 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <section className="mt-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:mt-5 sm:p-5">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold">盈亏排行</h2>
-              <p className="mt-1 text-sm text-slate-500">按当前累计盈亏排序。</p>
+              <p className="mt-0.5 text-xs text-slate-500 sm:mt-1 sm:text-sm">按当前累计盈亏排序。</p>
             </div>
             <BarChart3 className="size-5 text-slate-400" />
           </div>
 
-          <div className="mt-5 space-y-4">
+          <div className="mt-2 space-y-0.5 sm:mt-5 sm:space-y-4">
             {userStats.map((user) => {
               const pnl = toNumber(user.pnl_amount)
               const width = `${Math.max(12, (Math.abs(pnl) / maxAbsPnl) * 100)}%`
               const positive = pnl >= 0
 
               return (
-                <div key={user.participant_id} className="grid gap-2 sm:grid-cols-[82px_1fr_78px] sm:items-center">
-                  <div>
-                    <p className="font-medium">{user.name}</p>
-                    <p className="text-xs text-slate-500">{user.send_ratio}</p>
+                <div key={user.participant_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-0.5 sm:grid-cols-[82px_1fr_78px] sm:px-0 sm:py-0">
+                  <div className="min-w-0 sm:block">
+                    <p className="truncate text-xs font-medium sm:text-base">
+                      {user.name}
+                      <span className="ml-2 font-normal text-slate-400 sm:hidden">{user.send_ratio}</span>
+                    </p>
+                    <p className="hidden text-xs text-slate-500 sm:block">{user.send_ratio}</p>
                   </div>
-                  <div className="h-8 rounded-lg bg-slate-100 p-1">
+                  <div className="hidden h-8 rounded-lg bg-slate-100 p-1 sm:block">
                     <div className={`h-full rounded-md ${positive ? 'bg-emerald-500' : 'bg-red-500'}`} style={{ width }} />
                   </div>
-                  <div className={`text-right font-semibold ${positive ? 'text-emerald-700' : 'text-red-700'}`}>
+                  <div className={`text-right text-xs font-semibold sm:text-base ${positive ? 'text-emerald-700' : 'text-red-700'}`}>
                     {positive ? '+' : ''}
                     {user.pnl_amount}
                   </div>
@@ -1816,15 +2482,15 @@ function App() {
           </div>
         </section>
 
-        <section className="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-100 px-5 py-4">
+        <section className="mt-4 rounded-lg border border-slate-200 bg-white shadow-sm sm:mt-5">
+          <div className="border-b border-slate-100 px-3 py-3 sm:px-5 sm:py-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="text-base font-semibold">全员统计</h2>
-                <p className="mt-1 text-sm text-slate-500">选择一个用户查看个人概览。</p>
+                <p className="mt-0.5 text-xs text-slate-500 sm:mt-1 sm:text-sm">选择一个用户查看个人概览。</p>
               </div>
               <select
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100 sm:w-auto"
                 value={selectedStatsUserId}
                 onChange={(event) => setSelectedStatsUserId(event.target.value)}
               >
@@ -1843,21 +2509,34 @@ function App() {
 
         <section className="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-100 px-5 py-4">
-            <h2 className="text-base font-semibold">累计盈亏趋势</h2>
-            <p className="mt-1 text-sm text-slate-500">选择一个或多个用户查看折线趋势。</p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold">累计盈亏趋势</h2>
+                <p className="mt-1 text-sm text-slate-500">默认显示所有人，需要筛选时手动打开用户选择。</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setTrendSelectorOpen((current) => !current)}>
+                {trendSelectorOpen ? '收起选择' : '选择用户'}
+              </Button>
+            </div>
           </div>
 
-          <div className="grid gap-5 p-5 xl:grid-cols-[260px_1fr]">
+          <div className="space-y-4 p-3 sm:p-5">
+            {trendSelectorOpen ? (
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium text-slate-700">显示用户</p>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => setSelectedTrendUserIds(new Set(userStats.map((item) => item.participant_id)))}
-                >
-                  全选
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="xs" onClick={() => setSelectedTrendUserIds(new Set())}>
+                    全不选
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => setSelectedTrendUserIds(new Set(userStats.map((item) => item.participant_id)))}
+                  >
+                    全选
+                  </Button>
+                </div>
               </div>
               <div className="mt-3 grid gap-2">
                 {latestTrendByUser.map((trend) => {
@@ -1881,6 +2560,7 @@ function App() {
                 })}
               </div>
             </div>
+            ) : null}
 
             <TrendLineChart trends={trendPoints} selectedIds={selectedTrendUserIds} />
           </div>
@@ -2407,7 +3087,54 @@ function App() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="divide-y divide-slate-100 md:hidden">
+            {records.map((record) => {
+              const isExpanded = selectedRecord?.id === record.id
+
+              return (
+                <button
+                  key={record.id}
+                  type="button"
+                  className={`w-full px-4 py-3 text-left hover:bg-slate-50 ${isExpanded ? 'bg-red-50/60' : ''}`}
+                  onClick={() => openRecord(record.id)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-sm font-semibold">{record.sender_name}</p>
+                        <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">{record.claim_count} 人</span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{formatTime(record.time).slice(0, 16)}</p>
+                      {record.note ? <p className="mt-1 truncate text-xs text-slate-500">备注：{record.note}</p> : null}
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className="text-sm font-semibold">{formatMoney(record.total_amount)}</p>
+                      <p className="mt-1 text-xs text-slate-500">录入 {formatMoney(record.claimed_amount)}</p>
+                    </div>
+                  </div>
+
+                  {isExpanded ? (
+                    <div className="mt-3 rounded-lg border border-red-100 bg-white px-3 py-2">
+                      <div className="flex items-center justify-between text-xs font-medium text-slate-500">
+                        <span>抢包明细</span>
+                        <span>再点收起</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                        {selectedRecord.claims.map((claim) => (
+                          <div key={claim.id} className="flex min-w-0 items-center justify-between gap-2 rounded-md bg-slate-50 px-2 py-1.5 text-xs">
+                            <span className="min-w-0 truncate font-medium text-slate-700">{claim.participant_name}</span>
+                            <span className="shrink-0 font-semibold text-slate-950">{formatMoney(claim.amount)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[760px] text-left text-sm">
               <thead className="bg-slate-50 text-xs font-medium text-slate-500">
                 <tr>
@@ -2825,7 +3552,7 @@ function App() {
             <div className="mb-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
               当前密码不会以明文保存，因此不能查看原密码；需要知道密码时，请在这里重置为一个新密码并自行记录。
             </div>
-            <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_150px_92px]">
+            <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_150px_92px]">
               <input
                 className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={newAppUser.username}
@@ -2845,6 +3572,20 @@ function App() {
                 onChange={(event) => setNewAppUser((current) => ({ ...current, password: event.target.value }))}
                 placeholder="初始密码"
               />
+              <select
+                className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                value={newAppUser.participant_id ?? ''}
+                onChange={(event) =>
+                  setNewAppUser((current) => ({ ...current, participant_id: event.target.value ? Number(event.target.value) : null }))
+                }
+              >
+                <option value="">不绑定参与者</option>
+                {participants.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.name}
+                  </option>
+                ))}
+              </select>
               <select
                 className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                 value={newAppUser.role}
@@ -2868,11 +3609,12 @@ function App() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[960px] text-left text-sm">
+            <table className="w-full min-w-[1080px] text-left text-sm">
               <thead className="bg-slate-50 text-xs font-medium text-slate-500">
                 <tr>
                   <th className="px-5 py-3">用户名</th>
                   <th className="px-5 py-3">显示名称</th>
+                  <th className="px-5 py-3">绑定参与者</th>
                   <th className="px-5 py-3">角色</th>
                   <th className="px-5 py-3">状态</th>
                   <th className="px-5 py-3">新密码</th>
@@ -2884,6 +3626,7 @@ function App() {
                   const isSelf = currentUser?.id === user.id
                   const draft = appUserDrafts[user.id] ?? {
                     displayName: user.display_name,
+                    participantId: user.participant_id ? String(user.participant_id) : '',
                     role: user.role,
                     isActive: user.is_active,
                     password: '',
@@ -2903,6 +3646,25 @@ function App() {
                             }))
                           }
                         />
+                      </td>
+                      <td className="px-5 py-3">
+                        <select
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                          value={draft.participantId}
+                          onChange={(event) =>
+                            setAppUserDrafts((current) => ({
+                              ...current,
+                              [user.id]: { ...draft, participantId: event.target.value },
+                            }))
+                          }
+                        >
+                          <option value="">不绑定</option>
+                          {participants.map((participant) => (
+                            <option key={participant.id} value={participant.id}>
+                              {participant.name}
+                            </option>
+                          ))}
+                        </select>
                       </td>
                       <td className="px-5 py-3">
                         <select
@@ -3087,6 +3849,9 @@ function App() {
     if (activeView === 'entry') {
       return renderEntry()
     }
+    if (activeView === 'profile') {
+      return renderProfile()
+    }
     if (activeView === 'records') {
       return renderRecords()
     }
@@ -3095,6 +3860,9 @@ function App() {
     }
     if (activeView === 'announcements') {
       return renderAnnouncements()
+    }
+    if (activeView === 'popupNotices') {
+      return renderPopupNotices()
     }
     if (activeView === 'review') {
       return renderReviewQueue()
@@ -3114,80 +3882,183 @@ function App() {
     return renderDashboard()
   }
 
+  function changeLayoutMode(nextMode: LayoutMode) {
+    setLayoutMode(nextMode)
+    window.localStorage.setItem(layoutModeKey, nextMode)
+    setMobileNavOpen(false)
+  }
+
+  function cycleLayoutMode() {
+    changeLayoutMode(layoutMode === 'auto' ? 'mobile' : layoutMode === 'mobile' ? 'desktop' : 'auto')
+  }
+
+  function navigateToView(view: ViewKey, closeNav = false) {
+    setActiveView(view)
+    if (closeNav || mobileNavOpen) {
+      setMobileNavOpen(false)
+    }
+  }
+
+  function handleShellTouchStart(event: TouchEvent<HTMLElement>) {
+    if (forceDesktopShell) return
+    const touch = event.touches[0]
+    setTouchStart({ x: touch.clientX, y: touch.clientY })
+  }
+
+  function handleShellTouchEnd(event: TouchEvent<HTMLElement>) {
+    if (!touchStart || forceDesktopShell) return
+    const touch = event.changedTouches[0]
+    const deltaX = touch.clientX - touchStart.x
+    const deltaY = touch.clientY - touchStart.y
+    setTouchStart(null)
+
+    if (Math.abs(deltaY) > 80 || Math.abs(deltaX) < 70) return
+    if (deltaX > 0 && touchStart.x < 40) {
+      setMobileNavOpen(true)
+    }
+    if (deltaX < 0 && mobileNavOpen) {
+      setMobileNavOpen(false)
+    }
+  }
+
+  function renderNavigation(closeAfterSelect = false) {
+    return (
+      <nav className="space-y-1">
+        {visibleNavItems.map((item) => {
+          const Icon = item.icon
+          const active = activeView === item.key
+
+          return (
+            <button
+              key={item.label}
+              type="button"
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium ${
+                active
+                  ? 'bg-red-50 text-red-700 ring-1 ring-red-100'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+              }`}
+              onClick={() => navigateToView(item.key, closeAfterSelect)}
+            >
+              <Icon className="size-4 shrink-0" />
+              <span className="truncate">{item.label}</span>
+            </button>
+          )
+        })}
+      </nav>
+    )
+  }
+
+  function renderSidebarContent(closeAfterSelect = false) {
+    if (!currentUser) return null
+
+    return (
+      <div className="flex h-full flex-col px-4 py-5">
+        <div className="flex items-center gap-3 px-2">
+          <div className="flex size-10 items-center justify-center rounded-lg bg-red-600 text-white shadow-sm">
+            <Gift className="size-5" />
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-base font-semibold">红包履历统计</p>
+            <p className="text-xs text-slate-500">Web 工作台</p>
+          </div>
+        </div>
+
+        <div className="mt-8">{renderNavigation(closeAfterSelect)}</div>
+
+        <div className="mt-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-sm font-medium text-slate-900">{currentUser.display_name}</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            当前权限：{formatRole(currentUser.role)}。{isAdmin ? '可管理审核与系统数据。' : '可查看和提交记录。'}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   if (!currentUser) {
     return renderLogin()
   }
 
   return (
-    <main className="min-h-screen bg-[#f5f7fb] text-slate-950">
-      <div className="grid min-h-screen lg:grid-cols-[248px_1fr]">
-        <aside className="hidden border-r border-slate-200 bg-white lg:block">
-          <div className="flex h-full flex-col px-4 py-5">
-            <div className="flex items-center gap-3 px-2">
-              <div className="flex size-10 items-center justify-center rounded-lg bg-red-600 text-white shadow-sm">
-                <Gift className="size-5" />
-              </div>
-              <div>
-                <p className="text-base font-semibold">红包履历统计</p>
-                <p className="text-xs text-slate-500">Web 工作台</p>
-              </div>
-            </div>
-
-            <nav className="mt-8 space-y-1">
-              {navItems.map((item) => {
-                if (!isAdmin && !viewerVisibleViews.has(item.key)) {
-                  return null
-                }
-                const Icon = item.icon
-                const active = activeView === item.key
-
-                return (
-                  <button
-                    key={item.label}
-                    type="button"
-                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium ${
-                      active
-                        ? 'bg-red-50 text-red-700 ring-1 ring-red-100'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
-                    }`}
-                    onClick={() => setActiveView(item.key)}
-                  >
-                    <Icon className="size-4" />
-                    {item.label}
-                  </button>
-                )
-              })}
-            </nav>
-
-            <div className="mt-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <p className="text-sm font-medium text-slate-900">{currentUser.display_name}</p>
-              <p className="mt-1 text-xs leading-5 text-slate-500">
-                当前权限：{formatRole(currentUser.role)}。{isAdmin ? '可管理审核与系统数据。' : '只能查看和提交待审核记录。'}
-              </p>
-            </div>
-          </div>
+    <main
+      className="min-h-screen bg-[#f5f7fb] text-slate-950"
+      onTouchStart={handleShellTouchStart}
+      onTouchEnd={handleShellTouchEnd}
+    >
+      <div
+        className={`grid min-h-screen ${
+          forceDesktopShell ? 'min-w-[980px] grid-cols-[248px_1fr]' : forceMobileShell ? '' : 'lg:grid-cols-[248px_1fr]'
+        }`}
+      >
+        <aside className={`border-r border-slate-200 bg-white ${forceDesktopShell ? 'block' : forceMobileShell ? 'hidden' : 'hidden lg:block'}`}>
+          {renderSidebarContent(false)}
         </aside>
+
+        {!forceDesktopShell ? (
+          <div
+            className={`fixed inset-0 z-40 bg-slate-950/30 transition-opacity ${
+              mobileNavOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
+            } ${forceMobileShell ? '' : 'lg:hidden'}`}
+            onClick={() => setMobileNavOpen(false)}
+            aria-hidden="true"
+          />
+        ) : null}
+
+        {!forceDesktopShell ? (
+          <aside
+            className={`fixed inset-y-0 left-0 z-50 w-[72vw] max-w-[320px] min-w-[260px] border-r border-slate-200 bg-white shadow-2xl transition-transform duration-200 ${
+              mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
+            } ${forceMobileShell ? '' : 'lg:hidden'}`}
+            aria-label="移动端导航"
+          >
+            <div className="absolute right-3 top-3">
+              <Button variant="outline" size="icon" onClick={() => setMobileNavOpen(false)} aria-label="关闭导航">
+                <X className="size-4" />
+              </Button>
+            </div>
+            {renderSidebarContent(true)}
+          </aside>
+        ) : null}
 
         <section className="min-w-0">
           <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
-            <div className="flex items-center justify-between gap-4 px-4 py-4 sm:px-6 xl:px-8">
+            <div className="space-y-3 px-4 py-4 sm:px-6 lg:flex lg:items-center lg:justify-between lg:gap-4 lg:space-y-0 xl:px-8">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <CalendarDays className="size-4" />
-                  {appEnvironmentLabel ? `${appEnvironmentLabel} · ` : ''}
-                  {loading ? '正在读取数据' : '已连接数据'}
+                  {!forceDesktopShell ? (
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className={forceMobileShell ? 'mr-1' : 'mr-1 lg:hidden'}
+                      onClick={() => setMobileNavOpen(true)}
+                      aria-label="打开导航"
+                    >
+                      <Menu className="size-4" />
+                    </Button>
+                  ) : null}
+                  <CalendarDays className="size-4 shrink-0" />
+                  <span className="truncate">
+                    {appEnvironmentLabel ? `${appEnvironmentLabel} · ` : ''}
+                    {loading ? '正在读取数据' : '已连接数据'}
+                  </span>
                 </div>
-                <h1 className="mt-1 truncate text-2xl font-semibold tracking-normal">
+                <h1 className="mt-2 text-2xl font-semibold tracking-normal sm:truncate">
                   {activeView === 'dashboard' ? '红包统计首页' : navItems.find((item) => item.key === activeView)?.label}
                 </h1>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button variant="outline" className="hidden sm:inline-flex">
                   <Search className="size-4" />
                   搜索记录
                 </Button>
-                <Button className="bg-red-600 text-white hover:bg-red-700" onClick={() => setActiveView('entry')}>
+                {activeView === 'dashboard' ? (
+                  <Button variant="outline" size="sm" onClick={cycleLayoutMode}>
+                    <MonitorSmartphone className="size-4" />
+                    {layoutMode === 'auto' ? '自动' : layoutMode === 'mobile' ? '手机' : '桌面'}
+                  </Button>
+                ) : null}
+                <Button className="bg-red-600 text-white hover:bg-red-700" onClick={() => navigateToView('entry')}>
                   <LockKeyhole className="size-4" />
                   {isAdmin ? '管理员录入' : '提交录入'}
                 </Button>
@@ -3210,6 +4081,7 @@ function App() {
           </div>
         </section>
       </div>
+      {renderPopupNoticeModal()}
       {renderAvatarCropDialog()}
     </main>
   )

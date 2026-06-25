@@ -25,10 +25,13 @@ class AppUser(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(120))
+    participant_id: Mapped[int | None] = mapped_column(ForeignKey("participants.id"), nullable=True, unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), default="")
     role: Mapped[str] = mapped_column(String(24), default=AppRole.viewer.value, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    participant: Mapped["Participant | None"] = relationship()
 
 
 class Participant(Base):
@@ -70,6 +73,38 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PopupNotice(Base):
+    __tablename__ = "popup_notices"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(120), default="小公告")
+    content: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    recipients: Mapped[list["PopupNoticeRecipient"]] = relationship(
+        back_populates="notice",
+        cascade="all, delete-orphan",
+        order_by="PopupNoticeRecipient.user_id",
+    )
+
+
+class PopupNoticeRecipient(Base):
+    __tablename__ = "popup_notice_recipients"
+    __table_args__ = (UniqueConstraint("notice_id", "user_id", name="uq_popup_notice_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    notice_id: Mapped[int] = mapped_column(ForeignKey("popup_notices.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_users.id"), index=True)
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    notice: Mapped[PopupNotice] = relationship(back_populates="recipients")
+    user: Mapped[AppUser] = relationship()
 
 
 class RedPacketRecord(Base):

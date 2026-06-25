@@ -12,11 +12,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from auth import create_access_token, get_current_user, hash_password, require_admin
+from auth import create_access_token, get_current_user, hash_password, require_admin, verify_password
 from database import SessionLocal, create_db_and_tables, database_path, get_db
-from models import AmountPreset, Announcement, AppRole, AppSetting, AppUser, Participant, RecordStatus, RedPacketClaim, RedPacketRecord
+from models import (
+    AmountPreset,
+    Announcement,
+    AppRole,
+    AppSetting,
+    AppUser,
+    Participant,
+    PopupNotice,
+    PopupNoticeRecipient,
+    RecordStatus,
+    RedPacketClaim,
+    RedPacketRecord,
+)
 from money import cents_to_amount
 from schemas import (
     AmountPresetRead,
@@ -31,11 +43,17 @@ from schemas import (
     ImportRequest,
     LoginRequest,
     LoginResponse,
+    PasswordChange,
     ParticipantAvatarUpdate,
     ParticipantCreate,
     ParticipantRead,
     PinnedNoticeRead,
     PinnedNoticeUpdate,
+    PopupNoticeAck,
+    PopupNoticeCreate,
+    PopupNoticeCurrent,
+    PopupNoticeRead,
+    PopupNoticeUpdate,
     RecordCreate,
     RecordDetail,
     RecordListResponse,
@@ -57,9 +75,11 @@ from services import (
     deleted_records_query,
     ensure_app_user_setup,
     ensure_participant_setup,
+    ensure_popup_notice_columns,
     ensure_record_soft_delete_columns,
     get_record_query,
     import_json_data,
+    serialize_app_user,
     serialize_record_detail,
     serialize_record_list_item,
     update_record,
@@ -68,6 +88,7 @@ from services import (
 
 VALID_APP_ROLES = {"admin", "viewer", "contributor"}
 PINNED_NOTICE_KEY = "pinned_notice"
+PASSWORD_PATTERN = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{};':\"\\|,.<>/?`~")
 logger = logging.getLogger("red_packet")
 logging.basicConfig(level=logging.INFO)
 default_backup_dir = database_path.parent / "backups" if os.name == "nt" else Path("/home/ubuntu/red-packet-backups")
@@ -90,6 +111,54 @@ def serialize_backup(path: Path) -> dict:
         "size_bytes": stat.st_size,
         "created_at": datetime.fromtimestamp(stat.st_mtime),
     }
+
+
+def validate_password_value(password: str) -> None:
+    if not 6 <= len(password) <= 20:
+        raise HTTPException(status_code=400, detail="Password must be 6 to 20 characters")
+    if any(char not in PASSWORD_PATTERN for char in password):
+        raise HTTPException(status_code=400, detail="Password only supports ASCII letters, numbers and common symbols")
+
+
+def assert_participant_available(db: Session, participant_id: int | None, user_id: int | None = None) -> None:
+    if participant_id is None:
+        return
+    participant = db.get(Participant, participant_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Participant not found")
+    linked_user = db.scalar(select(AppUser).where(AppUser.participant_id == participant_id, AppUser.id != user_id))
+    if linked_user is not None:
+        raise HTTPException(status_code=409, detail="Participant is already linked to another user")
+
+
+def serialize_popup_notice(notice: PopupNotice) -> dict:
+    return {
+        "id": notice.id,
+        "title": notice.title,
+        "content": notice.content,
+        "is_active": notice.is_active,
+        "created_by_user_id": notice.created_by_user_id,
+        "created_at": notice.created_at,
+        "updated_at": notice.updated_at,
+        "recipients": [
+            {
+                "user_id": recipient.user_id,
+                "username": recipient.user.username,
+                "display_name": recipient.user.display_name,
+                "seen_at": recipient.seen_at,
+                "dismissed_at": recipient.dismissed_at,
+            }
+            for recipient in notice.recipients
+        ],
+    }
+
+
+def validate_popup_recipients(db: Session, recipient_user_ids: list[int]) -> list[AppUser]:
+    unique_ids = list(dict.fromkeys(recipient_user_ids))
+    users = db.scalars(select(AppUser).where(AppUser.id.in_(unique_ids), AppUser.is_active.is_(True))).all()
+    if len(users) != len(unique_ids):
+        raise HTTPException(status_code=400, detail="Recipient user does not exist or is inactive")
+    return users
 
 
 def create_database_backup() -> Path:
@@ -119,6 +188,7 @@ async def lifespan(_: FastAPI):
     create_db_and_tables()
     with SessionLocal() as db:
         ensure_record_soft_delete_columns(db)
+        ensure_popup_notice_columns(db)
         ensure_participant_setup(db)
         ensure_app_user_setup(db)
     yield
@@ -152,7 +222,43 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         logger.warning("login failed username=%s", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     logger.info("login success user_id=%s username=%s role=%s", user.id, user.username, user.role)
-    return {"user": user, "token": create_access_token(user)}
+    return {"user": serialize_app_user(user), "token": create_access_token(user)}
+
+
+@app.get("/me", response_model=AppUserRead)
+def get_me(current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    user = db.scalars(select(AppUser).where(AppUser.id == current_user.id).options(selectinload(AppUser.participant))).one()
+    return serialize_app_user(user)
+
+
+@app.put("/me/password", response_model=AppUserRead)
+def change_my_password(payload: PasswordChange, current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    validate_password_value(payload.new_password)
+    user = db.scalars(select(AppUser).where(AppUser.id == current_user.id).options(selectinload(AppUser.participant))).one()
+    if not verify_password(payload.old_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Old password is incorrect")
+    user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    db.refresh(user)
+    logger.info("password changed user_id=%s", user.id)
+    return serialize_app_user(user)
+
+
+@app.put("/me/avatar", response_model=AppUserRead)
+def update_my_avatar(payload: ParticipantAvatarUpdate, current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    user = db.scalars(select(AppUser).where(AppUser.id == current_user.id).options(selectinload(AppUser.participant))).one()
+    if user.participant is None:
+        raise HTTPException(status_code=400, detail="Current user is not linked to a participant")
+
+    avatar = payload.avatar_data_url
+    if avatar and not avatar.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="Avatar must be an image data URL")
+
+    user.participant.avatar_data_url = avatar
+    db.commit()
+    db.refresh(user)
+    logger.info("self avatar updated user_id=%s participant_id=%s has_avatar=%s", user.id, user.participant_id, bool(avatar))
+    return serialize_app_user(user)
 
 
 @app.get("/participants", response_model=list[ParticipantRead])
@@ -162,9 +268,25 @@ def list_participants(_: AppUser = Depends(get_current_user), db: Session = Depe
 
 @app.post("/participants", response_model=ParticipantRead)
 def create_participant(payload: ParticipantCreate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
-    participant = Participant(name=payload.name.strip())
+    name = payload.name.strip()
+    participant = Participant(name=name)
     db.add(participant)
     try:
+        db.flush()
+        existing_user = db.scalar(select(AppUser).where(AppUser.username == name))
+        if existing_user is None:
+            db.add(
+                AppUser(
+                    username=name,
+                    display_name=name,
+                    participant_id=participant.id,
+                    password_hash=hash_password("123456"),
+                    role=AppRole.viewer.value,
+                    is_active=True,
+                )
+            )
+        elif existing_user.participant_id is None:
+            existing_user.participant_id = participant.id
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -198,17 +320,21 @@ def update_participant_avatar(
 
 @app.get("/admin/app-users", response_model=list[AppUserRead])
 def list_app_users(_: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
-    return db.scalars(select(AppUser).order_by(AppUser.role, AppUser.username)).all()
+    users = db.scalars(select(AppUser).options(selectinload(AppUser.participant)).order_by(AppUser.role, AppUser.username)).all()
+    return [serialize_app_user(user) for user in users]
 
 
 @app.post("/admin/app-users", response_model=AppUserRead)
 def create_app_user(payload: AppUserCreate, _: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.role not in VALID_APP_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
+    validate_password_value(payload.password)
+    assert_participant_available(db, payload.participant_id)
 
     user = AppUser(
         username=payload.username.strip(),
         display_name=payload.display_name.strip(),
+        participant_id=payload.participant_id,
         password_hash=hash_password(payload.password),
         role=payload.role,
         is_active=payload.is_active,
@@ -221,7 +347,8 @@ def create_app_user(payload: AppUserCreate, _: AppUser = Depends(require_admin),
         raise HTTPException(status_code=409, detail="Username already exists") from exc
     db.refresh(user)
     logger.info("app user created id=%s username=%s role=%s", user.id, user.username, user.role)
-    return user
+    user = db.scalars(select(AppUser).where(AppUser.id == user.id).options(selectinload(AppUser.participant))).one()
+    return serialize_app_user(user)
 
 
 @app.put("/admin/app-users/{user_id}", response_model=AppUserRead)
@@ -232,6 +359,7 @@ def update_app_user(user_id: int, payload: AppUserUpdate, current_user: AppUser 
     user = db.get(AppUser, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    assert_participant_available(db, payload.participant_id, user_id=user.id)
     if user.id == current_user.id and (payload.role != AppRole.admin.value or not payload.is_active):
         raise HTTPException(status_code=400, detail="Cannot remove your own admin access")
 
@@ -243,15 +371,18 @@ def update_app_user(user_id: int, payload: AppUserUpdate, current_user: AppUser 
             raise HTTPException(status_code=400, detail="At least one active admin is required")
 
     user.display_name = payload.display_name.strip()
+    user.participant_id = payload.participant_id
     user.role = payload.role
     user.is_active = payload.is_active
     if payload.password:
+        validate_password_value(payload.password)
         user.password_hash = hash_password(payload.password)
 
     db.commit()
     db.refresh(user)
     logger.info("app user updated id=%s username=%s role=%s active=%s", user.id, user.username, user.role, user.is_active)
-    return user
+    user = db.scalars(select(AppUser).where(AppUser.id == user.id).options(selectinload(AppUser.participant))).one()
+    return serialize_app_user(user)
 
 
 @app.get("/amount-presets", response_model=list[AmountPresetRead])
@@ -290,6 +421,120 @@ def update_pinned_notice(payload: PinnedNoticeUpdate, current_user: AppUser = De
     db.refresh(setting)
     logger.info("pinned notice updated user_id=%s has_content=%s", current_user.id, bool(setting.value))
     return {"content": setting.value, "updated_at": setting.updated_at}
+
+
+@app.get("/popup-notices/current", response_model=PopupNoticeCurrent | None)
+def get_current_popup_notice(current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    recipient = db.scalars(
+        select(PopupNoticeRecipient)
+        .join(PopupNotice)
+        .where(
+            PopupNoticeRecipient.user_id == current_user.id,
+            PopupNoticeRecipient.dismissed_at.is_(None),
+            PopupNotice.is_active.is_(True),
+        )
+        .options(selectinload(PopupNoticeRecipient.notice))
+        .order_by(PopupNotice.created_at.desc(), PopupNotice.id.desc())
+    ).first()
+    if recipient is None:
+        return None
+
+    notice = recipient.notice
+    return {
+        "id": notice.id,
+        "title": notice.title,
+        "content": notice.content,
+        "created_at": notice.created_at,
+    }
+
+
+@app.post("/popup-notices/{notice_id}/ack")
+def ack_popup_notice(
+    notice_id: int,
+    payload: PopupNoticeAck,
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    recipient = db.scalar(
+        select(PopupNoticeRecipient).where(PopupNoticeRecipient.notice_id == notice_id, PopupNoticeRecipient.user_id == current_user.id)
+    )
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="Popup notice not found")
+
+    now = datetime.utcnow()
+    recipient.seen_at = recipient.seen_at or now
+    if payload.dismiss:
+        recipient.dismissed_at = now
+    db.commit()
+    logger.info("popup notice ack notice_id=%s user_id=%s dismiss=%s", notice_id, current_user.id, payload.dismiss)
+    return {"ok": True}
+
+
+@app.get("/admin/popup-notices", response_model=list[PopupNoticeRead])
+def list_popup_notices(_: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    notices = db.scalars(
+        select(PopupNotice)
+        .options(selectinload(PopupNotice.recipients).selectinload(PopupNoticeRecipient.user))
+        .order_by(PopupNotice.created_at.desc(), PopupNotice.id.desc())
+    ).all()
+    return [serialize_popup_notice(notice) for notice in notices]
+
+
+@app.post("/admin/popup-notices", response_model=PopupNoticeRead)
+def create_popup_notice(payload: PopupNoticeCreate, current_user: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    users = validate_popup_recipients(db, payload.recipient_user_ids)
+    notice = PopupNotice(
+        title=payload.title.strip(),
+        content=payload.content.strip(),
+        is_active=payload.is_active,
+        created_by_user_id=current_user.id,
+    )
+    db.add(notice)
+    db.flush()
+    for user in users:
+        db.add(PopupNoticeRecipient(notice_id=notice.id, user_id=user.id))
+    db.commit()
+    notice = db.scalars(
+        select(PopupNotice)
+        .where(PopupNotice.id == notice.id)
+        .options(selectinload(PopupNotice.recipients).selectinload(PopupNoticeRecipient.user))
+    ).one()
+    logger.info("popup notice created id=%s user_id=%s recipients=%s", notice.id, current_user.id, len(users))
+    return serialize_popup_notice(notice)
+
+
+@app.put("/admin/popup-notices/{notice_id}", response_model=PopupNoticeRead)
+def update_popup_notice(
+    notice_id: int,
+    payload: PopupNoticeUpdate,
+    current_user: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    users = validate_popup_recipients(db, payload.recipient_user_ids)
+    notice = db.scalars(
+        select(PopupNotice)
+        .where(PopupNotice.id == notice_id)
+        .options(selectinload(PopupNotice.recipients).selectinload(PopupNoticeRecipient.user))
+    ).first()
+    if notice is None:
+        raise HTTPException(status_code=404, detail="Popup notice not found")
+
+    notice.title = payload.title.strip()
+    notice.content = payload.content.strip()
+    notice.is_active = payload.is_active
+    notice.updated_at = datetime.utcnow()
+    notice.recipients.clear()
+    db.flush()
+    for user in users:
+        notice.recipients.append(PopupNoticeRecipient(user_id=user.id))
+    db.commit()
+    notice = db.scalars(
+        select(PopupNotice)
+        .where(PopupNotice.id == notice_id)
+        .options(selectinload(PopupNotice.recipients).selectinload(PopupNoticeRecipient.user))
+    ).one()
+    logger.info("popup notice updated id=%s user_id=%s recipients=%s", notice.id, current_user.id, len(users))
+    return serialize_popup_notice(notice)
 
 
 @app.post("/admin/announcements", response_model=AnnouncementRead)
@@ -501,23 +746,43 @@ def reject_record(record_id: int, _: AppUser = Depends(require_admin), db: Sessi
 
 
 @app.get("/stats/summary", response_model=SummaryStats)
-def stats_summary(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return build_summary(db)
+def stats_summary(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    _: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_summary(db, date_from=date_from, date_to=date_to)
 
 
 @app.get("/stats/users", response_model=list[UserStatsItem])
-def stats_users(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return build_user_stats(db)
+def stats_users(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    _: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_user_stats(db, date_from=date_from, date_to=date_to)
 
 
 @app.get("/stats/trends", response_model=list[TrendPoint])
-def stats_trends(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return build_trends(db)
+def stats_trends(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    _: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_trends(db, date_from=date_from, date_to=date_to)
 
 
 @app.get("/stats/records", response_model=RecordStatsResponse)
-def stats_records(_: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return build_record_stats(db)
+def stats_records(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    _: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_record_stats(db, date_from=date_from, date_to=date_to)
 
 
 @app.post("/admin/import-json", response_model=ImportReport)

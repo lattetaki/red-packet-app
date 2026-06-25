@@ -78,6 +78,9 @@ export type AppUser = {
   id: number
   username: string
   display_name: string
+  participant_id: number | null
+  participant_name: string | null
+  avatar_data_url: string | null
   role: 'admin' | 'viewer' | 'contributor'
   is_active: boolean
 }
@@ -112,6 +115,39 @@ export type AnnouncementPayload = {
 export type PinnedNotice = {
   content: string
   updated_at: string | null
+}
+
+export type PopupNoticeCurrent = {
+  id: number
+  title: string
+  content: string
+  created_at: string
+} | null
+
+export type PopupNoticeRecipient = {
+  user_id: number
+  username: string
+  display_name: string
+  seen_at: string | null
+  dismissed_at: string | null
+}
+
+export type PopupNotice = {
+  id: number
+  title: string
+  content: string
+  is_active: boolean
+  created_by_user_id: number | null
+  created_at: string
+  updated_at: string
+  recipients: PopupNoticeRecipient[]
+}
+
+export type PopupNoticePayload = {
+  title: string
+  content: string
+  recipient_user_ids: number[]
+  is_active: boolean
 }
 
 export type StatsParticipant = {
@@ -162,6 +198,7 @@ export type AppUserCreatePayload = {
   username: string
   display_name: string
   password: string
+  participant_id?: number | null
   role: AppUser['role']
   is_active: boolean
 }
@@ -169,8 +206,14 @@ export type AppUserCreatePayload = {
 export type AppUserUpdatePayload = {
   display_name: string
   password?: string
+  participant_id?: number | null
   role: AppUser['role']
   is_active: boolean
+}
+
+export type StatsQuery = {
+  dateFrom?: string
+  dateTo?: string
 }
 
 export type RecordCreatePayload = {
@@ -261,12 +304,35 @@ async function deleteJson<T>(path: string): Promise<T> {
   return handleResponse<T>(response)
 }
 
-export function getSummaryStats() {
-  return getJson<SummaryStats>('/stats/summary')
+function appendStatsParams(path: string, query: StatsQuery = {}) {
+  const params = new URLSearchParams()
+  if (query.dateFrom) params.set('date_from', query.dateFrom)
+  if (query.dateTo) params.set('date_to', query.dateTo)
+  const suffix = params.toString()
+  return suffix ? `${path}?${suffix}` : path
+}
+
+export function getSummaryStats(query: StatsQuery = {}) {
+  return getJson<SummaryStats>(appendStatsParams('/stats/summary', query))
 }
 
 export function login(username: string, password: string) {
   return postJson<LoginResponse, { username: string; password: string }>('/auth/login', { username, password })
+}
+
+export function getMe() {
+  return getJson<AppUser>('/me')
+}
+
+export function updateMyAvatar(avatarDataUrl: string | null) {
+  return putJson<AppUser, { avatar_data_url: string | null }>('/me/avatar', { avatar_data_url: avatarDataUrl })
+}
+
+export function changeMyPassword(oldPassword: string, newPassword: string) {
+  return putJson<AppUser, { old_password: string; new_password: string }>('/me/password', {
+    old_password: oldPassword,
+    new_password: newPassword,
+  })
 }
 
 export function getRecentRecords(limit = 6) {
@@ -297,16 +363,16 @@ export function getRecord(recordId: number) {
   return getJson<RecordDetail>(`/records/${recordId}`)
 }
 
-export function getUserStats() {
-  return getJson<UserStatsItem[]>('/stats/users')
+export function getUserStats(query: StatsQuery = {}) {
+  return getJson<UserStatsItem[]>(appendStatsParams('/stats/users', query))
 }
 
-export function getTrendPoints() {
-  return getJson<TrendPoint[]>('/stats/trends')
+export function getTrendPoints(query: StatsQuery = {}) {
+  return getJson<TrendPoint[]>(appendStatsParams('/stats/trends', query))
 }
 
-export function getRecordStats() {
-  return getJson<RecordStatsResponse>('/stats/records')
+export function getRecordStats(query: StatsQuery = {}) {
+  return getJson<RecordStatsResponse>(appendStatsParams('/stats/records', query))
 }
 
 export function getParticipants() {
@@ -335,6 +401,26 @@ export function getPinnedNotice() {
 
 export function updatePinnedNotice(content: string) {
   return putJson<PinnedNotice, { content: string }>('/admin/pinned-notice', { content })
+}
+
+export function getCurrentPopupNotice() {
+  return getJson<PopupNoticeCurrent>('/popup-notices/current')
+}
+
+export function ackPopupNotice(noticeId: number, dismiss: boolean) {
+  return postJson<{ ok: boolean }, { dismiss: boolean }>(`/popup-notices/${noticeId}/ack`, { dismiss })
+}
+
+export function getPopupNotices() {
+  return getJson<PopupNotice[]>('/admin/popup-notices')
+}
+
+export function createPopupNotice(payload: PopupNoticePayload) {
+  return postJson<PopupNotice, PopupNoticePayload>('/admin/popup-notices', payload)
+}
+
+export function updatePopupNotice(noticeId: number, payload: PopupNoticePayload) {
+  return putJson<PopupNotice, PopupNoticePayload>(`/admin/popup-notices/${noticeId}`, payload)
 }
 
 export function createAnnouncement(payload: AnnouncementPayload) {
