@@ -1,33 +1,39 @@
 import {
   BarChart3,
-  Bell,
   BookOpen,
   CalendarDays,
   Check,
   CircleDollarSign,
-  Database,
-  Download,
   Gift,
-  Home,
   ImageUp,
   LockKeyhole,
   LogOut,
-  ListChecks,
   Menu,
   Medal,
   MonitorSmartphone,
   Plus,
-  RotateCcw,
   Search,
   Trophy,
-  UserCircle,
   Users,
   X,
 } from 'lucide-react'
-import type { ElementType, TouchEvent } from 'react'
+import type { TouchEvent } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
+import { AvatarBubble } from '@/components/common/AvatarBubble'
+import { PasswordField } from '@/components/common/PasswordField'
+import { TrendLineChart } from '@/components/charts/TrendLineChart'
 import { Button } from '@/components/ui/button'
+import { navItems, viewerVisibleViews } from '@/config/navigation'
+import { LoginPage } from '@/features/auth/LoginPage'
+import { PopupNoticeModal } from '@/features/notices/PopupNoticeModal'
+import { currentDateTimeLocal, endOfDay, presetStartDate, startOfDay, toDateInputValue, toDateTimeLocal } from '@/lib/date'
+import { formatBytes, formatMoney, formatRole, formatStatus, formatTime } from '@/lib/format'
+import { clamp, toNumber, toRatioNumber } from '@/lib/number'
+import { isValidPasswordValue } from '@/lib/password'
+import { buildLatestTrendByUser, makeClientId, newClaim, sumClaimAmounts } from '@/lib/records'
+import { layoutModeKey, readLayoutMode, readSavedSession, readSenderDefaults, savedUserKey, senderDefaultsKey } from '@/lib/storage'
+import type { AppUserDraft, AuthSession, AvatarCropState, EntryClaim, LayoutMode, StatsRangePreset, SummaryItem, TouchPoint, ViewKey } from '@/types/app'
 import {
   ackPopupNotice,
   approveRecord,
@@ -79,7 +85,6 @@ import {
   type RecordDetail,
   type RecordListItem,
   type RecordStatsResponse,
-  type StatsParticipant,
   type StatsQuery,
   type StreakRecordStat,
   type SummaryStats,
@@ -97,92 +102,8 @@ import {
 } from './api'
 import './App.css'
 
-type ViewKey =
-  | 'dashboard'
-  | 'profile'
-  | 'entry'
-  | 'records'
-  | 'recordStats'
-  | 'announcements'
-  | 'popupNotices'
-  | 'review'
-  | 'deleted'
-  | 'users'
-  | 'backup'
-  | 'import'
-
-type SummaryItem = {
-  label: string
-  value: string
-  helper: string
-  icon: ElementType
-}
-
-type EntryClaim = {
-  id: string
-  participantId: string
-  amount: string
-}
-
-type AppUserDraft = {
-  displayName: string
-  participantId: string
-  role: AppUser['role']
-  isActive: boolean
-  password: string
-}
-
-type AuthSession = {
-  user: AppUser
-  token: string
-}
-
-type LayoutMode = 'auto' | 'mobile' | 'desktop'
-type StatsRangePreset = 'all' | 'day' | 'week' | 'month' | 'quarter' | 'custom'
-
-type TouchPoint = {
-  x: number
-  y: number
-}
-
-type AvatarCropState = {
-  participant: Participant | StatsParticipant
-  mode: 'participant' | 'self'
-  sourceUrl: string
-  imageWidth: number
-  imageHeight: number
-  scale: number
-  offsetX: number
-  offsetY: number
-  dragging: boolean
-  dragStartX: number
-  dragStartY: number
-  dragOriginX: number
-  dragOriginY: number
-}
-
-const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }> = [
-  { label: '首页', icon: Home, key: 'dashboard' },
-  { label: '个人主页', icon: UserCircle, key: 'profile' },
-  { label: '录入', icon: Plus, key: 'entry' },
-  { label: '记录列表', icon: ListChecks, key: 'records' },
-  { label: '记录统计', icon: Trophy, key: 'recordStats' },
-  { label: '更新公告', icon: BookOpen, key: 'announcements' },
-  { label: '弹窗公告', icon: Bell, key: 'popupNotices' },
-  { label: '审核队列', icon: LockKeyhole, key: 'review' },
-  { label: '已删除记录', icon: RotateCcw, key: 'deleted' },
-  { label: '用户管理', icon: Users, key: 'users' },
-  { label: '备份管理', icon: Download, key: 'backup' },
-  { label: '数据导入', icon: Database, key: 'import' },
-]
-
-const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'profile', 'entry', 'records', 'recordStats', 'announcements'])
-const savedUserKey = 'red-packet-current-user'
-const senderDefaultsKey = 'red-packet-sender-default-amounts'
-const layoutModeKey = 'red-packet-layout-mode'
 const appEnvironmentLabel = import.meta.env.VITE_APP_ENV_LABEL ?? ''
 
-const chartColors = ['#dc2626', '#059669', '#2563eb', '#d97706', '#7c3aed', '#0891b2', '#be123c', '#4f46e5']
 const avatarCropPreviewSize = 280
 const avatarOutputSize = 256
 
@@ -207,43 +128,6 @@ const fallbackRecordStats: RecordStatsResponse = {
   personal: [],
 }
 
-function formatMoney(amount: string) {
-  return `¥${amount}`
-}
-
-function formatTime(value: string) {
-  return value.replace('T', ' ').slice(0, 19)
-}
-
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
-
-function initials(name: string) {
-  return name.trim().slice(0, 2).toUpperCase() || '?'
-}
-
-function AvatarBubble({ participant, size = 'md' }: { participant: StatsParticipant | Participant; size?: 'sm' | 'md' | 'lg' | 'xl' }) {
-  const sizes = {
-    sm: 'size-9 text-xs',
-    md: 'size-11 text-sm',
-    lg: 'size-14 text-base',
-    xl: 'size-20 text-xl',
-  }
-
-  return (
-    <div className={`shrink-0 overflow-hidden rounded-lg bg-red-50 font-semibold text-red-700 ring-1 ring-red-100 ${sizes[size]}`}>
-      {participant.avatar_data_url ? (
-        <img className="size-full object-cover" src={participant.avatar_data_url} alt={`${participant.name} avatar`} />
-      ) : (
-        <div className="flex size-full items-center justify-center">{initials(participant.name)}</div>
-      )}
-    </div>
-  )
-}
-
 function readImageFile(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -251,232 +135,6 @@ function readImageFile(file: File) {
     reader.onerror = () => reject(new Error('File read failed'))
     reader.readAsDataURL(file)
   })
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value))
-}
-
-function formatRole(role: AppUser['role']) {
-  const labels: Record<AppUser['role'], string> = {
-    admin: '管理员',
-    viewer: '只读用户',
-    contributor: '协助录入',
-  }
-  return labels[role]
-}
-
-function formatStatus(status: string) {
-  const labels: Record<string, string> = {
-    approved: '已审核',
-    pending: '待审核',
-    rejected: '已驳回',
-  }
-  return labels[status] ?? status
-}
-
-function toNumber(value: string) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
-function toRatioNumber(value: string) {
-  if (value === '-') return -1
-  return toNumber(value.replace('%', ''))
-}
-
-function currentDateTimeLocal() {
-  const now = new Date()
-  const offset = now.getTimezoneOffset() * 60_000
-  return new Date(now.getTime() - offset).toISOString().slice(0, 16)
-}
-
-function toDateTimeLocal(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return currentDateTimeLocal()
-  }
-  const offset = date.getTimezoneOffset() * 60_000
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16)
-}
-
-function toDateInputValue(date: Date) {
-  const offset = date.getTimezoneOffset() * 60_000
-  return new Date(date.getTime() - offset).toISOString().slice(0, 10)
-}
-
-function startOfDay(date: Date) {
-  const next = new Date(date)
-  next.setHours(0, 0, 0, 0)
-  return next
-}
-
-function endOfDay(date: Date) {
-  const next = new Date(date)
-  next.setHours(23, 59, 59, 999)
-  return next
-}
-
-function presetStartDate(preset: Exclude<StatsRangePreset, 'custom'>) {
-  const date = startOfDay(new Date())
-  if (preset === 'week') date.setDate(date.getDate() - 6)
-  if (preset === 'month') date.setMonth(date.getMonth() - 1)
-  if (preset === 'quarter') date.setMonth(date.getMonth() - 3)
-  return date
-}
-
-function isValidPasswordValue(password: string) {
-  return /^[A-Za-z0-9!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]{6,20}$/.test(password)
-}
-
-function makeClientId() {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function newClaim(participantId = ''): EntryClaim {
-  return { id: makeClientId(), participantId, amount: '' }
-}
-
-function readSavedSession() {
-  const raw = window.localStorage.getItem(savedUserKey)
-  if (!raw) {
-    return null
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<AuthSession>
-    if (!parsed.user || !parsed.token) {
-      window.localStorage.removeItem(savedUserKey)
-      return null
-    }
-    setAuthToken(parsed.token)
-    return parsed as AuthSession
-  } catch {
-    window.localStorage.removeItem(savedUserKey)
-    return null
-  }
-}
-
-function readSenderDefaults() {
-  const raw = window.localStorage.getItem(senderDefaultsKey)
-  if (!raw) return {}
-  try {
-    return JSON.parse(raw) as Record<string, string>
-  } catch {
-    window.localStorage.removeItem(senderDefaultsKey)
-    return {}
-  }
-}
-
-function readLayoutMode(): LayoutMode {
-  const raw = window.localStorage.getItem(layoutModeKey)
-  return raw === 'mobile' || raw === 'desktop' || raw === 'auto' ? raw : 'auto'
-}
-
-function sumClaimAmounts(claims: EntryClaim[]) {
-  return claims.reduce((total, claim) => total + toNumber(claim.amount), 0)
-}
-
-function buildLatestTrendByUser(points: TrendPoint[]) {
-  const latest = new Map<number, TrendPoint>()
-  for (const point of points) {
-    latest.set(point.participant_id, point)
-  }
-  return Array.from(latest.values()).sort((a, b) => toNumber(b.pnl_amount) - toNumber(a.pnl_amount))
-}
-
-function TrendLineChart({ trends, selectedIds }: { trends: TrendPoint[]; selectedIds: Set<number> }) {
-  const series = Array.from(
-    trends.reduce((grouped, point) => {
-      if (!selectedIds.has(point.participant_id)) {
-        return grouped
-      }
-      grouped.set(point.participant_id, [...(grouped.get(point.participant_id) ?? []), point])
-      return grouped
-    }, new Map<number, TrendPoint[]>()),
-  ).map(([participantId, values], index) => ({
-    participantId,
-    name: values[0]?.participant_name ?? `用户 ${participantId}`,
-    color: chartColors[index % chartColors.length],
-    values: values.map((item) => toNumber(item.pnl_amount)),
-  }))
-  const finalValues = series
-    .map((item) => ({ ...item, finalValue: item.values[item.values.length - 1] ?? 0 }))
-    .sort((a, b) => b.finalValue - a.finalValue)
-
-  const allValues = series.flatMap((item) => item.values)
-  const minValue = Math.min(0, ...allValues)
-  const maxValue = Math.max(0, ...allValues)
-  const span = maxValue - minValue || 1
-  const width = 720
-  const height = 260
-  const padding = { top: 18, right: 20, bottom: 28, left: 62 }
-  const plotWidth = width - padding.left - padding.right
-  const plotHeight = height - padding.top - padding.bottom
-  const zeroY = padding.top + (maxValue / span) * plotHeight
-
-  if (series.length === 0) {
-    return (
-      <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
-        请选择至少一个用户查看趋势
-      </div>
-    )
-  }
-
-  return (
-    <div className="grid gap-3 xl:grid-cols-[1fr_180px]">
-      <div className="overflow-x-auto">
-      <svg className="min-w-[720px]" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="累计盈亏趋势折线图">
-        <rect x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} rx="8" fill="#f8fafc" />
-        {[0, 1, 2, 3, 4].map((tick) => {
-          const y = padding.top + (tick / 4) * plotHeight
-          const value = maxValue - (tick / 4) * span
-
-          return (
-            <g key={tick}>
-              <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} stroke="#e2e8f0" />
-              <text x={padding.left - 10} y={y + 4} textAnchor="end" className="fill-slate-600 text-[11px] font-medium">
-                ¥{value.toFixed(0)}
-              </text>
-            </g>
-          )
-        })}
-        <line x1={padding.left} x2={width - padding.right} y1={zeroY} y2={zeroY} stroke="#94a3b8" strokeDasharray="4 4" />
-
-        {series.map((item) => {
-          const points = item.values.map((value, index) => {
-            const x = padding.left + (item.values.length === 1 ? plotWidth / 2 : (index / (item.values.length - 1)) * plotWidth)
-            const y = padding.top + ((maxValue - value) / span) * plotHeight
-            return { x, y }
-          })
-          const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ')
-
-          return (
-            <g key={item.participantId}>
-              <path d={path} fill="none" stroke={item.color} strokeWidth="1.6" />
-              {points.slice(-1).map((point) => (
-                <circle key={`${item.participantId}-${point.x}`} cx={point.x} cy={point.y} r="2.8" fill={item.color} />
-              ))}
-            </g>
-          )
-        })}
-      </svg>
-      </div>
-      <div className="grid grid-cols-2 gap-1 text-xs sm:grid-cols-3 xl:block xl:space-y-2">
-        {finalValues.map((item) => (
-          <div key={item.participantId} className="flex items-center justify-between gap-2 rounded-md bg-slate-50 px-2 py-1 xl:bg-white xl:px-0">
-            <span className="min-w-0 truncate">
-              <span className="mr-1.5 inline-block size-2 rounded-full" style={{ backgroundColor: item.color }} />
-              {item.name}
-            </span>
-            <span className={`shrink-0 font-semibold ${item.finalValue >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
-              {formatMoney(item.finalValue.toFixed(2))}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 function App() {
@@ -1708,33 +1366,24 @@ function App() {
               {profileMessage ? <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{profileMessage}</div> : null}
               {profileError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{profileError}</div> : null}
               <div className="grid gap-3 md:grid-cols-3">
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-slate-500">旧密码</span>
-                  <input
-                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                    type="password"
-                    value={profilePasswordDraft.oldPassword}
-                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, oldPassword: event.target.value }))}
-                  />
-                </label>
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-slate-500">新密码</span>
-                  <input
-                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                    type="password"
-                    value={profilePasswordDraft.newPassword}
-                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, newPassword: event.target.value }))}
-                  />
-                </label>
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-slate-500">确认新密码</span>
-                  <input
-                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                    type="password"
-                    value={profilePasswordDraft.confirmPassword}
-                    onChange={(event) => setProfilePasswordDraft((current) => ({ ...current, confirmPassword: event.target.value }))}
-                  />
-                </label>
+                <PasswordField
+                  label="旧密码"
+                  value={profilePasswordDraft.oldPassword}
+                  onChange={(value) => setProfilePasswordDraft((current) => ({ ...current, oldPassword: value }))}
+                  autoComplete="current-password"
+                />
+                <PasswordField
+                  label="新密码"
+                  value={profilePasswordDraft.newPassword}
+                  onChange={(value) => setProfilePasswordDraft((current) => ({ ...current, newPassword: value }))}
+                  autoComplete="new-password"
+                />
+                <PasswordField
+                  label="确认新密码"
+                  value={profilePasswordDraft.confirmPassword}
+                  onChange={(value) => setProfilePasswordDraft((current) => ({ ...current, confirmPassword: value }))}
+                  autoComplete="new-password"
+                />
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs text-slate-500">密码长度 6-20 位，仅支持半角英文字母、数字和常见符号，不支持中文或空格。</p>
@@ -2019,69 +1668,6 @@ function App() {
           )}
         </section>
       </div>
-    )
-  }
-
-  function renderLogin() {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-[#f5f7fb] px-4 text-slate-950">
-        <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex size-11 items-center justify-center rounded-lg bg-red-600 text-white shadow-sm">
-              <Gift className="size-5" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">红包履历统计</h1>
-              <p className="mt-1 text-sm text-slate-500">登录后进入 Web 工作台</p>
-            </div>
-          </div>
-
-          <div className="mt-6 space-y-4">
-            <label className="space-y-1.5">
-              <span className="text-xs font-medium text-slate-500">用户名</span>
-              <input
-                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                value={loginUsername}
-                onChange={(event) => setLoginUsername(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    void handleLogin()
-                  }
-                }}
-                autoComplete="username"
-              />
-            </label>
-
-            <label className="space-y-1.5">
-              <span className="text-xs font-medium text-slate-500">密码</span>
-              <input
-                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                type="password"
-                value={loginPassword}
-                onChange={(event) => setLoginPassword(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    void handleLogin()
-                  }
-                }}
-                autoComplete="current-password"
-              />
-            </label>
-
-            {loginError ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{loginError}</div> : null}
-
-            <Button className="w-full bg-slate-950 text-white hover:bg-slate-800" onClick={handleLogin} disabled={loggingIn}>
-              {loggingIn ? '登录中' : '登录'}
-            </Button>
-          </div>
-
-          <div className="mt-5 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">
-            普通用户只能查看首页、提交录入和查看已审核记录；管理员可以审核、管理用户和维护数据。
-          </div>
-        </section>
-      </main>
     )
   }
 
@@ -2403,38 +1989,6 @@ function App() {
           </div>
         ) : null}
       </section>
-    )
-  }
-
-  function renderPopupNoticeModal() {
-    if (!currentPopupNotice) return null
-
-    return (
-      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 px-4">
-        <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white shadow-2xl">
-          <div className="border-b border-slate-100 px-5 py-4">
-            <h2 className="text-base font-semibold">{currentPopupNotice.title}</h2>
-          </div>
-          <div className="space-y-4 p-5">
-            <div className="max-h-[42vh] overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-sm leading-6 text-slate-700">
-              {currentPopupNotice.content}
-            </div>
-            <label className="flex items-center gap-2 text-sm text-slate-600">
-              <input
-                type="checkbox"
-                checked={popupNoticeDismiss}
-                onChange={(event) => setPopupNoticeDismiss(event.target.checked)}
-              />
-              下次不再提醒这一条
-            </label>
-            <div className="flex justify-end">
-              <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={closeCurrentPopupNotice}>
-                知道了
-              </Button>
-            </div>
-          </div>
-        </section>
-      </div>
     )
   }
 
@@ -3976,7 +3530,17 @@ function App() {
   }
 
   if (!currentUser) {
-    return renderLogin()
+    return (
+      <LoginPage
+        username={loginUsername}
+        password={loginPassword}
+        error={loginError}
+        loggingIn={loggingIn}
+        onUsernameChange={setLoginUsername}
+        onPasswordChange={setLoginPassword}
+        onLogin={handleLogin}
+      />
+    )
   }
 
   return (
@@ -4081,7 +3645,12 @@ function App() {
           </div>
         </section>
       </div>
-      {renderPopupNoticeModal()}
+      <PopupNoticeModal
+        notice={currentPopupNotice}
+        dismissed={popupNoticeDismiss}
+        onDismissedChange={setPopupNoticeDismiss}
+        onClose={closeCurrentPopupNotice}
+      />
       {renderAvatarCropDialog()}
     </main>
   )
