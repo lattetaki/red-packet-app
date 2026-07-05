@@ -15,6 +15,7 @@ export type ViewKey =
   | 'users'
   | 'backup'
   | 'import'
+  | 'activityLogs'
 
 export type SummaryItem = {
   label: string

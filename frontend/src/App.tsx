@@ -24,7 +24,7 @@ import { AvatarBubble } from '@/components/common/AvatarBubble'
 import { PasswordField } from '@/components/common/PasswordField'
 import { TrendLineChart } from '@/components/charts/TrendLineChart'
 import { Button } from '@/components/ui/button'
-import { navItems, viewerVisibleViews } from '@/config/navigation'
+import { navItems, superAdminOnlyViews, viewerVisibleViews } from '@/config/navigation'
 import { LoginPage } from '@/features/auth/LoginPage'
 import { PopupNoticeModal } from '@/features/notices/PopupNoticeModal'
 import { currentDateTimeLocal, endOfDay, presetStartDate, startOfDay, toDateInputValue, toDateTimeLocal } from '@/lib/date'
@@ -44,11 +44,13 @@ import {
   createPopupNotice,
   createRecord,
   changeMyPassword,
+  cancelRecord,
   deleteRecord,
   downloadBackup,
   getAmountPresets,
   getAnnouncements,
   getAppUsers,
+  getActivityLogs,
   getBackups,
   getDeletedRecords,
   getMe,
@@ -64,6 +66,7 @@ import {
   getSummaryStats,
   getTrendPoints,
   getUserStats,
+  logPageView,
   login,
   setAuthToken,
   type Announcement,
@@ -71,6 +74,7 @@ import {
   type AppUser,
   type AppUserCreatePayload,
   type AppUserUpdatePayload,
+  type ActivityLogItem,
   type AmountPreset,
   type BackupInfo,
   type ClaimRecordStat,
@@ -166,6 +170,9 @@ function App() {
   const [pendingRecords, setPendingRecords] = useState<RecordListItem[]>([])
   const [myRecords, setMyRecords] = useState<RecordListItem[]>([])
   const [myRecordTotal, setMyRecordTotal] = useState(0)
+  const [myRecordDetail, setMyRecordDetail] = useState<RecordDetail | null>(null)
+  const [myRecordDetailError, setMyRecordDetailError] = useState<string | null>(null)
+  const [cancelingMyRecordId, setCancelingMyRecordId] = useState<number | null>(null)
   const [deletedRecords, setDeletedRecords] = useState<RecordListItem[]>([])
   const [deletedRecordTotal, setDeletedRecordTotal] = useState(0)
   const [deletedRecordMessage, setDeletedRecordMessage] = useState<string | null>(null)
@@ -188,6 +195,13 @@ function App() {
   const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [appUsers, setAppUsers] = useState<AppUser[]>([])
+  const [activityLogs, setActivityLogs] = useState<ActivityLogItem[]>([])
+  const [activityLogTotal, setActivityLogTotal] = useState(0)
+  const [activityEventFilter, setActivityEventFilter] = useState('')
+  const [activityActorFilter, setActivityActorFilter] = useState('')
+  const [activitySearch, setActivitySearch] = useState('')
+  const [activityLogError, setActivityLogError] = useState<string | null>(null)
+  const [loadingActivityLogs, setLoadingActivityLogs] = useState(false)
   const [appUserDrafts, setAppUserDrafts] = useState<Record<number, AppUserDraft>>({})
   const [newAppUser, setNewAppUser] = useState<AppUserCreatePayload>({
     username: '',
@@ -255,13 +269,15 @@ function App() {
   const currentUserId = currentUser?.id
   const authTokenValue = authSession?.token
   const currentRole = currentUser?.role ?? 'viewer'
-  const isAdmin = currentRole === 'admin'
+  const isAdmin = currentRole === 'admin' || currentRole === 'super_admin'
+  const isSuperAdmin = currentRole === 'super_admin'
   const forceMobileShell = layoutMode === 'mobile'
   const forceDesktopShell = layoutMode === 'desktop'
   const visibleNavItems = useMemo(
-    () => navItems.filter((item) => isAdmin || viewerVisibleViews.has(item.key)),
-    [isAdmin],
+    () => navItems.filter((item) => viewerVisibleViews.has(item.key) || (superAdminOnlyViews.has(item.key) ? isSuperAdmin : isAdmin)),
+    [isAdmin, isSuperAdmin],
   )
+  const navLabelByKey = useMemo(() => new Map(navItems.map((item) => [item.key, item.label])), [])
   const statsQuery = useMemo<StatsQuery>(() => {
     if (statsRangePreset === 'all') return {}
     return {
@@ -447,6 +463,26 @@ function App() {
     setBackups(data)
   }
 
+  const loadActivityLogs = useCallback(async () => {
+    if (!isSuperAdmin) return
+    setActivityLogError(null)
+    try {
+      setLoadingActivityLogs(true)
+      const data = await getActivityLogs({
+        eventType: activityEventFilter || undefined,
+        actorUserId: activityActorFilter || undefined,
+        search: activitySearch || undefined,
+        limit: 100,
+      })
+      setActivityLogs(data.items)
+      setActivityLogTotal(data.total)
+    } catch {
+      setActivityLogError('读取访问记录失败。')
+    } finally {
+      setLoadingActivityLogs(false)
+    }
+  }, [activityActorFilter, activityEventFilter, activitySearch, isSuperAdmin])
+
   async function handleCreateBackup() {
     setBackupMessage(null)
     setBackupError(null)
@@ -487,6 +523,42 @@ function App() {
     const data = await getMyRecords({ limit: 10 })
     setMyRecords(data.items)
     setMyRecordTotal(data.total)
+    if (myRecordDetail && !data.items.some((record) => record.id === myRecordDetail.id)) {
+      setMyRecordDetail(null)
+    }
+  }
+
+  async function openMyRecord(recordId: number) {
+    setMyRecordDetailError(null)
+    if (myRecordDetail?.id === recordId) {
+      setMyRecordDetail(null)
+      return
+    }
+
+    try {
+      const record = await getRecord(recordId)
+      setMyRecordDetail(record)
+    } catch {
+      setMyRecordDetailError('读取提交详情失败。')
+    }
+  }
+
+  async function cancelMyRecord(recordId: number) {
+    const confirmed = window.confirm('确认撤回这条待审核提交吗？撤回后不会进入管理员审核队列。')
+    if (!confirmed) return
+
+    setMyRecordDetailError(null)
+    try {
+      setCancelingMyRecordId(recordId)
+      const updated = await cancelRecord(recordId)
+      setMyRecordDetail(updated)
+      await loadMyRecords()
+      await loadDashboardData()
+    } catch {
+      setMyRecordDetailError('撤回失败，只有自己提交且仍待审核的记录可以撤回。')
+    } finally {
+      setCancelingMyRecordId(null)
+    }
   }
 
   async function handleLogin() {
@@ -1020,6 +1092,22 @@ function App() {
     window.addEventListener('red-packet-auth-expired', handleAuthExpired)
     return () => window.removeEventListener('red-packet-auth-expired', handleAuthExpired)
   }, [])
+
+  useEffect(() => {
+    if (!currentUserId || !authTokenValue) return
+    const label = navLabelByKey.get(activeView) ?? activeView
+    void logPageView(activeView, label).catch(() => {
+      // Activity logging should never interrupt normal browsing.
+    })
+  }, [activeView, authTokenValue, currentUserId, navLabelByKey])
+
+  useEffect(() => {
+    if (activeView !== 'activityLogs' || !isSuperAdmin) return
+    const timer = window.setTimeout(() => {
+      void loadActivityLogs()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [activeView, isSuperAdmin, loadActivityLogs])
 
   const summaryItems: SummaryItem[] = useMemo(
     () => [
@@ -1718,6 +1806,8 @@ function App() {
   }
 
   async function submitEntry() {
+    if (savingEntry) return
+
     setEntryMessage(null)
     setEntryError(null)
 
@@ -2345,32 +2435,86 @@ function App() {
               {myRecords.length === 0 ? (
                 <div className="px-4 py-4 text-sm text-slate-500">暂无由当前账号提交的记录。</div>
               ) : (
-                myRecords.map((record) => (
-                  <button
-                    key={record.id}
-                    type="button"
-                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm hover:bg-slate-50"
-                    onClick={() => openRecord(record.id)}
-                  >
-                    <span>
-                      <span className="font-medium">{record.sender_name}</span>
-                      <span className="ml-2 text-slate-500">{formatTime(record.time)}</span>
-                    </span>
-                    <span
-                      className={`rounded-md px-2 py-1 text-xs font-medium ${
-                        record.status === 'approved'
-                          ? 'bg-emerald-50 text-emerald-700'
-                          : record.status === 'pending'
-                            ? 'bg-amber-50 text-amber-700'
-                            : 'bg-slate-100 text-slate-500'
-                      }`}
-                    >
-                      {formatStatus(record.status)}
-                    </span>
-                  </button>
-                ))
+                myRecords.map((record) => {
+                  const expanded = myRecordDetail?.id === record.id
+
+                  return (
+                    <div key={record.id}>
+                      <button
+                        type="button"
+                        className={`flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm hover:bg-slate-50 ${expanded ? 'bg-red-50/50' : ''}`}
+                        onClick={() => openMyRecord(record.id)}
+                      >
+                        <span className="min-w-0">
+                          <span className="font-medium">{record.sender_name}</span>
+                          <span className="ml-2 text-slate-500">{formatTime(record.time)}</span>
+                        </span>
+                        <span
+                          className={`shrink-0 rounded-md px-2 py-1 text-xs font-medium ${
+                            record.status === 'approved'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : record.status === 'pending'
+                                ? 'bg-amber-50 text-amber-700'
+                                : record.status === 'cancelled'
+                                  ? 'bg-slate-100 text-slate-500'
+                                  : 'bg-red-50 text-red-700'
+                          }`}
+                        >
+                          {formatStatus(record.status)}
+                        </span>
+                      </button>
+
+                      {expanded ? (
+                        <div className="space-y-3 border-t border-red-100 bg-red-50/30 px-4 py-3 text-sm">
+                          <div className="grid gap-2 text-slate-600 sm:grid-cols-2">
+                            <div>
+                              <span className="text-xs text-slate-500">总额</span>
+                              <p className="font-semibold text-slate-950">{formatMoney(myRecordDetail.total_amount)}</p>
+                            </div>
+                            <div>
+                              <span className="text-xs text-slate-500">明细合计</span>
+                              <p className="font-semibold text-slate-950">{formatMoney(myRecordDetail.claimed_amount)}</p>
+                            </div>
+                            {myRecordDetail.note ? (
+                              <div className="sm:col-span-2">
+                                <span className="text-xs text-slate-500">备注</span>
+                                <p className="text-slate-700">{myRecordDetail.note}</p>
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="rounded-lg border border-slate-200 bg-white">
+                            {myRecordDetail.claims.map((claim) => (
+                              <div key={claim.id} className="flex items-center justify-between border-b border-slate-100 px-3 py-2 last:border-b-0">
+                                <span className="font-medium text-slate-700">{claim.participant_name}</span>
+                                <span className="font-semibold text-slate-950">{formatMoney(claim.amount)}</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs text-slate-500">再次点击该提交可收起详情。</p>
+                            {myRecordDetail.status === 'pending' ? (
+                              <Button
+                                variant="outline"
+                                size="xs"
+                                onClick={() => cancelMyRecord(myRecordDetail.id)}
+                                disabled={cancelingMyRecordId === myRecordDetail.id}
+                              >
+                                {cancelingMyRecordId === myRecordDetail.id ? '撤回中' : '撤回提交'}
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })
               )}
             </div>
+            {myRecordDetailError ? (
+              <div className="border-t border-red-100 bg-red-50 px-4 py-2 text-xs text-red-700">{myRecordDetailError}</div>
+            ) : null}
             <div className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">共 {myRecordTotal} 条</div>
           </div>
         </div>
@@ -2753,7 +2897,7 @@ function App() {
   }
 
   function renderReviewQueue() {
-    if (currentRole !== 'admin') {
+    if (!isAdmin) {
       return renderPlaceholder('审核队列', '该页面仅管理员可见。')
     }
 
@@ -2839,7 +2983,7 @@ function App() {
   }
 
   function renderDeletedRecords() {
-    if (currentRole !== 'admin') {
+    if (!isAdmin) {
       return renderPlaceholder('已删除记录', '该页面仅管理员可见。')
     }
 
@@ -2906,7 +3050,7 @@ function App() {
   }
 
   function renderBackups() {
-    if (currentRole !== 'admin') {
+    if (!isAdmin) {
       return renderPlaceholder('备份管理', '该页面仅管理员可见。')
     }
 
@@ -3084,8 +3228,203 @@ function App() {
     )
   }
 
+  function activityEventLabel(eventType: string) {
+    const labels: Record<string, string> = {
+      login_success: '登录成功',
+      login_failed: '登录失败',
+      page_view: '浏览页面',
+      record_submitted: '提交记录',
+      record_cancelled: '撤回提交',
+      record_updated: '编辑记录',
+      record_deleted: '删除记录',
+      record_restored: '恢复记录',
+      record_approved: '审核通过',
+      record_rejected: '审核驳回',
+      password_changed: '修改密码',
+      avatar_updated: '更新头像',
+      participant_created: '新增参与者',
+      participant_avatar_updated: '更新参与者头像',
+      app_user_created: '新增账号',
+      app_user_updated: '更新账号',
+      pinned_notice_updated: '置顶公告',
+      popup_notice_created: '发布弹窗',
+      popup_notice_updated: '更新弹窗',
+      announcement_created: '发布公告',
+      announcement_updated: '更新公告',
+      backup_created: '创建备份',
+      json_imported: '数据导入',
+    }
+    return labels[eventType] ?? eventType
+  }
+
+  function activityTone(eventType: string) {
+    if (eventType.includes('failed') || eventType.includes('rejected') || eventType.includes('deleted')) {
+      return 'border-red-200 bg-red-50 text-red-700'
+    }
+    if (eventType.includes('approved') || eventType.includes('created') || eventType.includes('success')) {
+      return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    }
+    if (eventType.includes('page_view')) {
+      return 'border-slate-200 bg-slate-50 text-slate-600'
+    }
+    return 'border-amber-200 bg-amber-50 text-amber-700'
+  }
+
+  function renderActivityDetail(log: ActivityLogItem) {
+    const entries = Object.entries(log.details).filter(([, value]) => value !== null && value !== undefined && value !== '')
+    if (entries.length === 0 && !log.ip_address && !log.user_agent) return null
+
+    return (
+      <div className="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2 lg:grid-cols-3">
+        {log.ip_address ? (
+          <div className="rounded-md bg-slate-50 px-2 py-1.5">
+            <span className="font-medium text-slate-600">来源 IP：</span>
+            {log.ip_address}
+          </div>
+        ) : null}
+        {entries.slice(0, 6).map(([key, value]) => (
+          <div key={key} className="rounded-md bg-slate-50 px-2 py-1.5">
+            <span className="font-medium text-slate-600">{key}：</span>
+            {Array.isArray(value) ? value.join(', ') : String(value)}
+          </div>
+        ))}
+        {log.user_agent ? (
+          <div className="rounded-md bg-slate-50 px-2 py-1.5 sm:col-span-2 lg:col-span-3">
+            <span className="font-medium text-slate-600">设备：</span>
+            <span className="break-all">{log.user_agent}</span>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderActivityLogs() {
+    if (!isSuperAdmin) {
+      return renderPlaceholder('访问记录', '该页面仅 white 可见。')
+    }
+
+    const eventOptions = [
+      '',
+      'login_success',
+      'login_failed',
+      'page_view',
+      'record_submitted',
+      'record_cancelled',
+      'record_approved',
+      'record_rejected',
+      'record_deleted',
+      'app_user_updated',
+      'backup_created',
+    ]
+    const recentLoginCount = activityLogs.filter((log) => log.event_type === 'login_success').length
+    const recentRecordActionCount = activityLogs.filter((log) => log.event_type.startsWith('record_')).length
+
+    return (
+      <div className="space-y-5">
+        <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 className="text-base font-semibold">访问记录</h2>
+              <p className="mt-1 text-sm text-slate-500">只对 white 开放，用来查看登录、录入、审核和页面访问等关键行为。</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={loadActivityLogs} disabled={loadingActivityLogs}>
+              {loadingActivityLogs ? '读取中' : '刷新'}
+            </Button>
+          </div>
+
+          <div className="grid gap-3 border-b border-slate-100 p-5 sm:grid-cols-3">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs text-slate-500">当前筛选结果</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950">{activityLogTotal}</p>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs text-slate-500">本页登录成功</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950">{recentLoginCount}</p>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs text-slate-500">本页记录动作</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950">{recentRecordActionCount}</p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 border-b border-slate-100 p-5 lg:grid-cols-[180px_180px_1fr_92px]">
+            <select
+              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              value={activityEventFilter}
+              onChange={(event) => setActivityEventFilter(event.target.value)}
+            >
+              {eventOptions.map((eventType) => (
+                <option key={eventType || 'all'} value={eventType}>
+                  {eventType ? activityEventLabel(eventType) : '全部类型'}
+                </option>
+              ))}
+            </select>
+            <select
+              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              value={activityActorFilter}
+              onChange={(event) => setActivityActorFilter(event.target.value)}
+            >
+              <option value="">全部用户</option>
+              {appUsers.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.display_name}
+                </option>
+              ))}
+            </select>
+            <input
+              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              value={activitySearch}
+              onChange={(event) => setActivitySearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void loadActivityLogs()
+              }}
+              placeholder="搜索用户、摘要、目标 ID"
+            />
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={loadActivityLogs} disabled={loadingActivityLogs}>
+              筛选
+            </Button>
+          </div>
+
+          {activityLogError ? <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700">{activityLogError}</div> : null}
+
+          <div className="divide-y divide-slate-100">
+            {activityLogs.length === 0 ? (
+              <div className="px-5 py-10 text-center text-sm text-slate-500">当前没有访问记录。</div>
+            ) : (
+              activityLogs.map((log) => (
+                <article key={log.id} className="px-5 py-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-md border px-2 py-1 text-xs font-medium ${activityTone(log.event_type)}`}>
+                          {activityEventLabel(log.event_type)}
+                        </span>
+                        <p className="font-medium text-slate-950">{log.summary}</p>
+                      </div>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {log.actor_display_name || log.actor_username || '未知用户'} · {formatRole(log.actor_role as AppUser['role'])} ·{' '}
+                        {formatTime(log.created_at)}
+                      </p>
+                      {renderActivityDetail(log)}
+                    </div>
+                    {log.target_type ? (
+                      <div className="shrink-0 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                        <span className="font-medium text-slate-600">{log.target_type}</span>
+                        {log.target_id ? <span className="ml-1">#{log.target_id}</span> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   function renderUsers() {
-    if (currentRole !== 'admin') {
+    if (!isAdmin) {
       return renderPlaceholder('用户管理', '该页面仅管理员可见。')
     }
 
@@ -3147,7 +3486,7 @@ function App() {
               >
                 <option value="viewer">只读用户</option>
                 <option value="contributor">协助录入</option>
-                <option value="admin">管理员</option>
+                {isSuperAdmin ? <option value="admin">管理员</option> : null}
               </select>
               <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={createLoginAccount} disabled={savingAppUserId === 'new'}>
                 {savingAppUserId === 'new' ? '新增中' : '新增'}
@@ -3178,6 +3517,7 @@ function App() {
               <tbody className="divide-y divide-slate-100">
                 {appUsers.map((user) => {
                   const isSelf = currentUser?.id === user.id
+                  const isSuperAdminUser = user.role === 'super_admin'
                   const draft = appUserDrafts[user.id] ?? {
                     displayName: user.display_name,
                     participantId: user.participant_id ? String(user.participant_id) : '',
@@ -3224,7 +3564,7 @@ function App() {
                         <select
                           className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
                           value={draft.role}
-                          disabled={isSelf}
+                          disabled={isSelf || isSuperAdminUser || (!isSuperAdmin && (user.role === 'admin' || draft.role === 'admin'))}
                           onChange={(event) =>
                             setAppUserDrafts((current) => ({
                               ...current,
@@ -3234,7 +3574,8 @@ function App() {
                         >
                           <option value="viewer">只读用户</option>
                           <option value="contributor">协助录入</option>
-                          <option value="admin">管理员</option>
+                          {isSuperAdminUser ? <option value="super_admin">超级管理员</option> : null}
+                          {isSuperAdmin || user.role === 'admin' || draft.role === 'admin' ? <option value="admin">管理员</option> : null}
                         </select>
                       </td>
                       <td className="px-5 py-3">
@@ -3242,7 +3583,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={draft.isActive}
-                            disabled={isSelf}
+                            disabled={isSelf || isSuperAdminUser}
                             onChange={(event) =>
                               setAppUserDrafts((current) => ({
                                 ...current,
@@ -3356,7 +3697,7 @@ function App() {
   }
 
   function renderImport() {
-    if (currentRole !== 'admin') {
+    if (!isAdmin) {
       return renderPlaceholder('数据导入', '该页面仅管理员可见。')
     }
 
@@ -3432,6 +3773,9 @@ function App() {
     }
     if (activeView === 'import') {
       return renderImport()
+    }
+    if (activeView === 'activityLogs') {
+      return renderActivityLogs()
     }
     return renderDashboard()
   }

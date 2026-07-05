@@ -8,6 +8,7 @@ from app.db.session import Base
 
 
 class AppRole(StrEnum):
+    super_admin = "super_admin"
     admin = "admin"
     viewer = "viewer"
     contributor = "contributor"
@@ -17,6 +18,7 @@ class RecordStatus(StrEnum):
     approved = "approved"
     pending = "pending"
     rejected = "rejected"
+    cancelled = "cancelled"
 
 
 class AppUser(Base):
@@ -105,6 +107,26 @@ class PopupNoticeRecipient(Base):
 
     notice: Mapped[PopupNotice] = relationship(back_populates="recipients")
     user: Mapped[AppUser] = relationship()
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    summary: Mapped[str] = mapped_column(String(240))
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), nullable=True, index=True)
+    actor_username: Mapped[str] = mapped_column(String(80), default="")
+    actor_display_name: Mapped[str] = mapped_column(String(120), default="")
+    actor_role: Mapped[str] = mapped_column(String(24), default="")
+    target_type: Mapped[str] = mapped_column(String(80), default="", index=True)
+    target_id: Mapped[str] = mapped_column(String(80), default="")
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    ip_address: Mapped[str] = mapped_column(String(80), default="")
+    user_agent: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    actor: Mapped[AppUser | None] = relationship()
 
 
 class RedPacketRecord(Base):

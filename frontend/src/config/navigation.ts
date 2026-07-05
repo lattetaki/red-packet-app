@@ -1,6 +1,7 @@
 import {
   Bell,
   BookOpen,
+  ClipboardList,
   Database,
   Download,
   Home,
@@ -29,6 +30,8 @@ export const navItems: Array<{ label: string; icon: ElementType; key: ViewKey }>
   { label: '用户管理', icon: Users, key: 'users' },
   { label: '备份管理', icon: Download, key: 'backup' },
   { label: '数据导入', icon: Database, key: 'import' },
+  { label: '访问记录', icon: ClipboardList, key: 'activityLogs' },
 ]
 
 export const viewerVisibleViews = new Set<ViewKey>(['dashboard', 'profile', 'entry', 'records', 'recordStats', 'announcements'])
+export const superAdminOnlyViews = new Set<ViewKey>(['activityLogs'])

@@ -81,13 +81,42 @@ export type AppUser = {
   participant_id: number | null
   participant_name: string | null
   avatar_data_url: string | null
-  role: 'admin' | 'viewer' | 'contributor'
+  role: 'super_admin' | 'admin' | 'viewer' | 'contributor'
   is_active: boolean
 }
 
 export type LoginResponse = {
   user: AppUser
   token: string
+}
+
+export type ActivityLogItem = {
+  id: number
+  event_type: string
+  summary: string
+  actor_user_id: number | null
+  actor_username: string
+  actor_display_name: string
+  actor_role: string
+  target_type: string
+  target_id: string
+  details: Record<string, unknown>
+  ip_address: string
+  user_agent: string
+  created_at: string
+}
+
+export type ActivityLogResponse = {
+  items: ActivityLogItem[]
+  total: number
+}
+
+export type ActivityLogQuery = {
+  eventType?: string
+  actorUserId?: string
+  search?: string
+  offset?: number
+  limit?: number
 }
 
 export type BackupInfo = {
@@ -221,7 +250,7 @@ export type RecordCreatePayload = {
   sender_id: number
   total_amount: string
   note: string
-  status: 'approved' | 'pending' | 'rejected'
+  status: 'approved' | 'pending' | 'rejected' | 'cancelled'
   claims: Array<{
     participant_id: number
     amount: string
@@ -320,6 +349,20 @@ export function login(username: string, password: string) {
   return postJson<LoginResponse, { username: string; password: string }>('/auth/login', { username, password })
 }
 
+export function logPageView(viewKey: string, viewLabel: string) {
+  return postJson<{ ok: boolean }, { view_key: string; view_label: string }>('/activity/page-view', { view_key: viewKey, view_label: viewLabel })
+}
+
+export function getActivityLogs(query: ActivityLogQuery = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(query.limit ?? 100))
+  params.set('offset', String(query.offset ?? 0))
+  if (query.eventType) params.set('event_type', query.eventType)
+  if (query.actorUserId) params.set('actor_user_id', query.actorUserId)
+  if (query.search) params.set('search', query.search)
+  return getJson<ActivityLogResponse>(`/admin/activity-logs?${params.toString()}`)
+}
+
 export function getMe() {
   return getJson<AppUser>('/me')
 }
@@ -361,6 +404,10 @@ export function getMyRecords(query: Pick<RecordQuery, 'offset' | 'limit'> = {}) 
 
 export function getRecord(recordId: number) {
   return getJson<RecordDetail>(`/records/${recordId}`)
+}
+
+export function cancelRecord(recordId: number) {
+  return postJson<RecordDetail, Record<string, never>>(`/records/${recordId}/cancel`, {})
 }
 
 export function getUserStats(query: StatsQuery = {}) {

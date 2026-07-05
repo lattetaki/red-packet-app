@@ -89,6 +89,12 @@ def get_current_user(
 
 
 def require_admin(current_user: AppUser = Depends(get_current_user)) -> AppUser:
-    if current_user.role != AppRole.admin.value:
+    if current_user.role not in {AppRole.admin.value, AppRole.super_admin.value}:
         raise HTTPException(status_code=403, detail="Admin permission required")
+    return current_user
+
+
+def require_super_admin(current_user: AppUser = Depends(get_current_user)) -> AppUser:
+    if current_user.role != AppRole.super_admin.value:
+        raise HTTPException(status_code=403, detail="Super admin permission required")
     return current_user

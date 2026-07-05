@@ -20,11 +20,12 @@ export function initials(name: string) {
 
 export function formatRole(role: AppUser['role']) {
   const labels: Record<AppUser['role'], string> = {
+    super_admin: '超级管理员',
     admin: '管理员',
     viewer: '只读用户',
     contributor: '协助录入',
   }
-  return labels[role]
+  return labels[role] ?? role
 }
 
 export function formatStatus(status: string) {
@@ -32,6 +33,7 @@ export function formatStatus(status: string) {
     approved: '已审核',
     pending: '待审核',
     rejected: '已驳回',
+    cancelled: '已撤回',
   }
   return labels[status] ?? status
 }

@@ -49,6 +49,32 @@ class LoginResponse(BaseModel):
     token: str
 
 
+class ActivityPageView(BaseModel):
+    view_key: str = Field(min_length=1, max_length=80)
+    view_label: str = Field(min_length=1, max_length=120)
+
+
+class ActivityLogRead(BaseModel):
+    id: int
+    event_type: str
+    summary: str
+    actor_user_id: int | None = None
+    actor_username: str
+    actor_display_name: str
+    actor_role: str
+    target_type: str
+    target_id: str
+    details: dict
+    ip_address: str
+    user_agent: str
+    created_at: datetime
+
+
+class ActivityLogListResponse(BaseModel):
+    items: list[ActivityLogRead]
+    total: int
+
+
 class AppUserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     display_name: str = Field(min_length=1, max_length=120)

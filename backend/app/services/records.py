@@ -1,6 +1,6 @@
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -33,7 +33,7 @@ INITIAL_APP_USERS = (
         "username": "white",
         "display_name": "white",
         "password": "whiteadmin",
-        "role": AppRole.admin.value,
+        "role": AppRole.super_admin.value,
     },
 )
 
@@ -103,7 +103,7 @@ def ensure_app_user_setup(db: Session) -> None:
             target.participant_id = participant.id
             if not target.password_hash:
                 target.password_hash = hash_password("123456")
-            if target.username == participant.name and target.role != AppRole.admin.value:
+            if target.username == participant.name and target.role not in {AppRole.admin.value, AppRole.super_admin.value}:
                 target.display_name = participant.name
                 target.role = AppRole.viewer.value
                 target.is_active = True
@@ -241,6 +241,48 @@ def serialize_record_detail(record: RedPacketRecord) -> dict:
     return data
 
 
+def normalize_duplicate_time(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def find_recent_duplicate_record(db: Session, payload: RecordCreate, created_by_user_id: int | None) -> RedPacketRecord | None:
+    expected_time = normalize_duplicate_time(payload.time)
+    expected_note = payload.note.strip()
+    expected_total_cents = amount_to_cents(payload.total_amount)
+    expected_claims = tuple((claim.participant_id, amount_to_cents(claim.amount)) for claim in payload.claims)
+    cutoff = datetime.utcnow() - timedelta(seconds=30)
+
+    query = (
+        select(RedPacketRecord)
+        .where(
+            RedPacketRecord.deleted_at.is_(None),
+            RedPacketRecord.created_at >= cutoff,
+            RedPacketRecord.created_by_user_id == created_by_user_id,
+            RedPacketRecord.sender_id == payload.sender_id,
+            RedPacketRecord.total_amount_cents == expected_total_cents,
+            RedPacketRecord.status == payload.status,
+        )
+        .options(selectinload(RedPacketRecord.claims))
+        .order_by(RedPacketRecord.created_at.desc())
+    )
+
+    for record in db.scalars(query).all():
+        record_time = normalize_duplicate_time(record.time)
+        if expected_time is not None and record_time is not None and abs((record_time - expected_time).total_seconds()) > 1:
+            continue
+        if record.note != expected_note:
+            continue
+        actual_claims = tuple((claim.participant_id, claim.amount_cents) for claim in record.claims)
+        if actual_claims == expected_claims:
+            return record
+
+    return None
+
+
 def create_record(db: Session, payload: RecordCreate, created_by_user_id: int | None = None) -> RedPacketRecord:
     sender = db.get(Participant, payload.sender_id)
     if sender is None:
@@ -257,8 +299,12 @@ def create_record(db: Session, payload: RecordCreate, created_by_user_id: int | 
     if missing_ids:
         raise ValueError(f"Claim participant does not exist: {sorted(missing_ids)}")
 
+    duplicate = find_recent_duplicate_record(db, payload, created_by_user_id)
+    if duplicate is not None:
+        return duplicate
+
     record = RedPacketRecord(
-        time=payload.time or datetime.utcnow(),
+        time=normalize_duplicate_time(payload.time) or datetime.utcnow(),
         sender_id=payload.sender_id,
         total_amount_cents=amount_to_cents(payload.total_amount),
         note=payload.note.strip(),
