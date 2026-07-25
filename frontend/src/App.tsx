@@ -3989,6 +3989,26 @@ function App() {
           </div>
         </section>
       </div>
+      <footer className="border-t border-slate-200 bg-white px-4 py-4 text-center text-xs text-slate-500 sm:px-6 xl:px-8">
+        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+          <a
+            href="https://beian.miit.gov.cn/"
+            target="_blank"
+            rel="noreferrer"
+            className="transition-colors hover:text-slate-900"
+          >
+            滇ICP备2026012368号-1
+          </a>
+          <a
+            href="https://beian.mps.gov.cn/#/query/webSearch?code=53038102530575"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 transition-colors hover:text-slate-900"
+          >
+            滇公网安备53038102530575号
+          </a>
+        </div>
+      </footer>
       <PopupNoticeModal
         notice={currentPopupNotice}
         dismissed={popupNoticeDismiss}
